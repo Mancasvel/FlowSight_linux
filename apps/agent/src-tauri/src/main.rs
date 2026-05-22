@@ -171,5 +171,68 @@ fn main() {
     );
   }
 
+  #[cfg(target_os = "linux")]
+  linux_maybe_reexec_under_portal_scope();
+
   app_lib::run();
+}
+
+/// GNOME resolves native apps via `app-gnome-<APP_ID>-<pid>.scope`. Re-exec once so the portal
+/// sees `ai.flowsight.agent` (matches PermissionStore + Settings) instead of a generic `app` id.
+#[cfg(target_os = "linux")]
+fn linux_maybe_reexec_under_portal_scope() {
+  use std::process::Command;
+
+  if std::env::var_os("FLOWSIGHT_IN_PORTAL_SCOPE").is_some() {
+    return;
+  }
+  if std::env::var("WAYLAND_DISPLAY").is_err() {
+    return;
+  }
+  let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+  if !desktop.contains("gnome") {
+    return;
+  }
+
+  let want = app_lib::screen_capture::LINUX_PORTAL_APP_ID;
+  if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
+    if cgroup.contains(&format!("app-gnome-{want}")) || cgroup.contains(&format!("app-{want}")) {
+      std::env::set_var("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
+      return;
+    }
+  }
+
+  let Ok(exe) = std::env::current_exe() else {
+    return;
+  };
+  if !Command::new("which")
+    .arg("systemd-run")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+  {
+    return;
+  }
+
+  let unit = format!("app-gnome-{want}-{}.scope", std::process::id());
+  let mut cmd = Command::new("systemd-run");
+  cmd.args([
+    "--user",
+    "--scope",
+    &format!("--unit={unit}"),
+    "--collect",
+    "--",
+  ]);
+  cmd.arg(&exe);
+  for arg in std::env::args().skip(1) {
+    cmd.arg(arg);
+  }
+  cmd.env("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
+
+  match cmd.status() {
+    Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+    Err(e) => eprintln!("[FlowSight] systemd-run portal scope failed: {e}"),
+  }
 }

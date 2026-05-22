@@ -43,6 +43,11 @@ urlencoding = "2.1"
 flate2 = "1"
 tar = "0.4"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "time"] }
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 zip = "2"
 screenshots = "0.8"

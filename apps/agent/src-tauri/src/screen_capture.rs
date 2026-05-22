@@ -4,13 +4,20 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::DynamicImage;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
 static LINUX_AUTOINSTALL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+static LINUX_PERMISSIONS_GRANTED: AtomicBool = AtomicBool::new(false);
+
+/// Tauri bundle identifier — must match `tauri.conf.json` and the portal permission store.
+#[cfg(target_os = "linux")]
+pub const LINUX_PORTAL_APP_ID: &str = "ai.flowsight.agent";
 
 pub fn capture_screen() -> Result<(String, PathBuf), String> {
     #[cfg(windows)]
@@ -73,6 +80,11 @@ fn process_rgba_dynamic(img: DynamicImage) -> Result<(String, PathBuf), String> 
 fn process_png_bytes(png: &[u8]) -> Result<(String, PathBuf), String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
     process_rgba_dynamic(img)
+}
+
+#[cfg(target_os = "linux")]
+pub fn png_is_mostly_black_pub(png: &[u8]) -> bool {
+    png_is_mostly_black(png)
 }
 
 #[cfg(target_os = "linux")]
@@ -161,6 +173,8 @@ const LINUX_CAPTURE_CANDIDATES: &[&str] = &[
 fn tool_in_path(name: &str) -> bool {
     Command::new("which")
         .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -182,9 +196,12 @@ fn has_command(name: &str) -> bool {
 fn try_distro_install_capture_tools() -> Result<String, String> {
     let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
-    // Package sets: grim (Wayland), gnome-screenshot (GNOME Wayland/X), scrot (X11 fallback).
-    let apt_pkgs = if wayland {
-        "grim gnome-screenshot scrot"
+    // GNOME Wayland uses xdg-desktop-portal (no gnome-screenshot package — avoids shutter flash).
+    let gnome = linux_is_gnome_session();
+    let apt_pkgs = if wayland && gnome {
+        "scrot"
+    } else if wayland {
+        "grim scrot"
     } else {
         "scrot maim imagemagick grim"
     };
@@ -196,24 +213,30 @@ fn try_distro_install_capture_tools() -> Result<String, String> {
         );
         Command::new("pkexec").args(["sh", "-c", &script]).status()
     } else if has_command("dnf") {
-        let pkgs = if wayland {
-            "grim gnome-screenshot scrot"
+        let pkgs = if wayland && linux_is_gnome_session() {
+            "scrot"
+        } else if wayland {
+            "grim scrot"
         } else {
             "scrot maim ImageMagick grim"
         };
         let script = format!("dnf install -y {}", pkgs);
         Command::new("pkexec").args(["sh", "-c", &script]).status()
     } else if has_command("pacman") {
-        let pkgs = if wayland {
-            "grim gnome-screenshot scrot"
+        let pkgs = if wayland && linux_is_gnome_session() {
+            "scrot"
+        } else if wayland {
+            "grim scrot"
         } else {
             "scrot maim imagemagick grim"
         };
         let script = format!("pacman -S --needed --noconfirm {}", pkgs);
         Command::new("pkexec").args(["sh", "-c", &script]).status()
     } else if has_command("zypper") {
-        let pkgs = if wayland {
-            "grim gnome-screenshot scrot"
+        let pkgs = if wayland && linux_is_gnome_session() {
+            "scrot"
+        } else if wayland {
+            "grim scrot"
         } else {
             "scrot maim ImageMagick grim"
         };
@@ -244,29 +267,135 @@ fn try_distro_install_capture_tools() -> Result<String, String> {
     }
 }
 
-/// Called from Start: ensures grim/scrot/… are installed once per app session (Linux only).
+/// Grant xdg-desktop-portal screenshot permission without a GNOME dialog (PermissionStore).
+#[cfg(target_os = "linux")]
+fn linux_grant_portal_screenshot_permission(app_id: &str) -> bool {
+    Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.impl.portal.PermissionStore",
+            "--object-path",
+            "/org/freedesktop/impl/portal/PermissionStore",
+            "--method",
+            "org.freedesktop.impl.portal.PermissionStore.SetPermission",
+            "screenshot",
+            "true",
+            "screenshot",
+            app_id,
+            "['yes']",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// App IDs the portal may use for this process (systemd scope name, dev binary `app`, etc.).
+#[cfg(target_os = "linux")]
+pub fn linux_collect_portal_app_ids() -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut ids = BTreeSet::new();
+    ids.insert(LINUX_PORTAL_APP_ID.to_string());
+    ids.insert("app".to_string());
+    ids.insert("flowsight-agent".to_string());
+    ids.insert("FlowSight Agent".to_string());
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) {
+            if !stem.is_empty() {
+                ids.insert(stem.to_string());
+            }
+        }
+    }
+
+    if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
+        for line in cgroup.lines() {
+            let Some(scope) = line.rsplit('/').next() else {
+                continue;
+            };
+            let Some(base) = scope.strip_suffix(".scope") else {
+                continue;
+            };
+            let rest = base
+                .strip_prefix("app-gnome-")
+                .or_else(|| base.strip_prefix("app-"));
+            let Some(rest) = rest else {
+                continue;
+            };
+            let Some(dash) = rest.rfind('-') else {
+                continue;
+            };
+            let (app_part, pid_part) = rest.split_at(dash);
+            if !pid_part[1..].chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let decoded = app_part
+                .replace("\\x2d", "-")
+                .replace("\\x2e", ".");
+            if !decoded.is_empty() {
+                ids.insert(decoded);
+            }
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
+/// Pre-grant portal screenshot access for every plausible app id (no Settings UI required).
+#[cfg(target_os = "linux")]
+pub fn linux_auto_grant_screenshot_permissions() -> Vec<String> {
+    if LINUX_PERMISSIONS_GRANTED.swap(true, Ordering::SeqCst) {
+        return Vec::new();
+    }
+    let mut granted = Vec::new();
+    for id in linux_collect_portal_app_ids() {
+        if linux_grant_portal_screenshot_permission(&id) {
+            log::info!("[FlowSight] Granted portal screenshot permission for '{id}'");
+            granted.push(id);
+        }
+    }
+    granted
+}
+
+/// Called from Start: grant portal permission + ensure grim/scrot when needed (Linux only).
 #[tauri::command]
 pub fn ensure_linux_capture_dependencies() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "linux")]
     {
+        let granted = linux_auto_grant_screenshot_permissions();
+        let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+
+        if linux_is_gnome_session() && wayland {
+            let sc = crate::linux_silent_capture::linux_auto_grant_screencast_permissions();
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "message": "Silent capture via PipeWire ScreenCast (no shutter flash or sound).",
+                "granted_app_ids": granted,
+                "screencast_app_ids": sc,
+            }));
+        }
+
         if linux_any_capture_tool_in_path() {
             return Ok(serde_json::json!({
                 "status": "ok",
                 "message": "Screen capture tools already available"
             }));
         }
-
         if LINUX_AUTOINSTALL_ATTEMPTED.swap(true, Ordering::SeqCst) {
             return Ok(serde_json::json!({
                 "status": "already_attempted",
-                "message": "Automatic install was already tried this session. Install manually: sudo apt install grim gnome-screenshot scrot"
+                "message": "Automatic install was already tried this session. On GNOME: Settings → Privacy → Screen Capture. Else: sudo apt install grim scrot"
             }));
         }
 
         if !has_command("pkexec") {
             return Ok(serde_json::json!({
                 "status": "install_failed",
-                "message": "pkexec not found. Install manually: sudo apt install grim gnome-screenshot scrot"
+                "message": "pkexec not found. On GNOME allow Screen Capture for FlowSight; else: sudo apt install grim scrot"
             }));
         }
 
@@ -295,11 +424,26 @@ pub fn ensure_linux_capture_dependencies() -> Result<serde_json::Value, String> 
 }
 
 #[cfg(target_os = "linux")]
-fn linux_is_gnome_session() -> bool {
-    std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_lowercase()
-        .contains("gnome")
+pub fn linux_is_gnome_session() -> bool {
+    let check = |v: &str| {
+        let l = v.to_lowercase();
+        l.contains("gnome") || l.contains("ubuntu") || l.contains("unity")
+    };
+    if std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|v| check(&v))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if std::env::var("DESKTOP_SESSION")
+        .map(|v| check(&v))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Tauri/GTK apps often lack desktop env vars; detect GNOME by installed shell.
+    std::path::Path::new("/usr/bin/gnome-shell").exists()
+        || std::path::Path::new("/usr/libexec/gnome-session-binary").exists()
 }
 
 /// Parse absolute paths to image files from `gdbus call` stdout/stderr (GNOME returns `filename_used`).
@@ -324,6 +468,13 @@ fn paths_from_gdbus_screenshot_reply(s: &str) -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
+}
+
+/// GNOME Shell full-screen capture via D-Bus (`flash=false`) — no white shutter animation.
+#[cfg(target_os = "linux")]
+pub fn try_linux_gnome_shell_capture() -> Option<Vec<u8>> {
+    linux_auto_grant_screenshot_permissions();
+    linux_raw_gnome_shell_dbus()
 }
 
 /// GNOME Shell full-screen capture via D-Bus (`flash=false`). Often denied on modern GNOME;
@@ -385,26 +536,74 @@ fn linux_raw_gnome_shell_dbus() -> Option<Vec<u8>> {
     None
 }
 
-/// `gnome-screenshot -f` — reliable on GNOME Wayland (D-Bus Shell API is often AccessDenied).
+/// GNOME: never use Screenshot portal (white flash + shutter sound on every capture).
 #[cfg(target_os = "linux")]
-fn linux_raw_gnome_screenshot_cli() -> Option<Vec<u8>> {
-    if !tool_in_path("gnome-screenshot") {
+pub fn linux_must_avoid_screenshot_portal() -> bool {
+    linux_is_gnome_session()
+}
+
+/// Silent capture via xdg-desktop-portal Screenshot. Blocked on GNOME (flashes).
+#[cfg(target_os = "linux")]
+pub async fn try_linux_portal_capture() -> Option<Vec<u8>> {
+    if linux_is_gnome_session() {
+        log::warn!(
+            "[FlowSight] Screenshot portal skipped on GNOME (use ScreenCast — no flash)"
+        );
         return None;
     }
-    let tmp = tmp_png_name("flowsight_gnome_cli");
-    let tmp_s = tmp.to_str()?;
-    let ok = Command::new("gnome-screenshot")
-        .args(["-f", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        let _ = std::fs::remove_file(&tmp);
+    use ashpd::desktop::screenshot::Screenshot;
+
+    linux_auto_grant_screenshot_permissions();
+
+    let portal_req = match Screenshot::request()
+        .interactive(false)
+        .modal(false)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[FlowSight] portal screenshot request failed: {e}");
+            return None;
+        }
+    };
+
+    let resp = match portal_req.response() {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[FlowSight] portal screenshot denied or failed: {e}");
+            return None;
+        }
+    };
+
+    let path = resp.uri().to_file_path().ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    if bytes.len() < 500 || png_is_mostly_black(&bytes) {
+        log::warn!("[FlowSight] portal screenshot returned empty or black frame");
         return None;
     }
-    let bytes = try_read_tmp_png(&tmp)?;
-    let _ = std::fs::remove_file(&tmp);
+    log::info!("[FlowSight] Linux screen capture succeeded via portal");
     Some(bytes)
+}
+
+/// Turn raw portal PNG bytes into base64 + debug path (after async portal capture).
+#[cfg(target_os = "linux")]
+pub fn finish_linux_png_bytes(bytes: Vec<u8>) -> Result<(String, PathBuf), String> {
+    match linux_finish_png(bytes) {
+        Some(Ok(r)) => Ok(r),
+        Some(Err(e)) => Err(e),
+        None => Err("Screenshot was empty or all-black.".to_string()),
+    }
+}
+
+/// ScreenCast frames may be dark on first buffer; still run through vision.
+#[cfg(target_os = "linux")]
+pub fn finish_linux_png_bytes_screencast(bytes: Vec<u8>) -> Result<(String, PathBuf), String> {
+    if bytes.len() < 500 {
+        return Err("ScreenCast frame too small.".to_string());
+    }
+    process_png_bytes(&bytes)
 }
 
 #[cfg(target_os = "linux")]
@@ -473,13 +672,15 @@ fn capture_linux() -> Result<(String, PathBuf), String> {
     let gnome = linux_is_gnome_session();
     let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
-    // Order matters: on GNOME+Wayland, `scrot` returns a valid but all-black PNG (~8 KB)
-    // and must not run before `gnome-screenshot`.
+    // GNOME 49+ blocks legacy gnome-screenshot API (flash + shutter). Prefer portal, then Shell D-Bus.
     let mut pipeline: Vec<(&'static str, fn() -> Option<Vec<u8>>)> = Vec::new();
 
+    // GNOME: never Shell Screenshot or portal (flash + sound). ScreenCast runs in agent.rs.
     if gnome {
-        pipeline.push(("gnome-screenshot", linux_raw_gnome_screenshot_cli));
-        pipeline.push(("gnome-shell-dbus", linux_raw_gnome_shell_dbus));
+        return Err(
+            "On GNOME use ScreenCast only. Press Start monitoring to open a silent PipeWire session."
+                .into(),
+        );
     }
 
     if !gnome {
@@ -504,18 +705,20 @@ fn capture_linux() -> Result<(String, PathBuf), String> {
         ));
     }
 
-    pipeline.push((
-        "spectacle",
-        || linux_capture_to_tmp("spectacle", &["-b", "-o"]),
-    ));
-    pipeline.push((
-        "xfce4-screenshooter",
-        || linux_capture_to_tmp("xfce4-screenshooter", &["-f"]),
-    ));
-    pipeline.push((
-        "flameshot",
-        || linux_capture_to_tmp("flameshot", &["screen", "-p"]),
-    ));
+    if !(gnome && wayland) {
+        pipeline.push((
+            "spectacle",
+            || linux_capture_to_tmp("spectacle", &["-b", "-o"]),
+        ));
+        pipeline.push((
+            "xfce4-screenshooter",
+            || linux_capture_to_tmp("xfce4-screenshooter", &["-f"]),
+        ));
+        pipeline.push((
+            "flameshot",
+            || linux_capture_to_tmp("flameshot", &["screen", "-p"]),
+        ));
+    }
 
     let mut black_rejects = 0u32;
 
@@ -537,9 +740,11 @@ fn capture_linux() -> Result<(String, PathBuf), String> {
     }
 
     let hint = if gnome && wayland {
-        "On GNOME Wayland use `gnome-screenshot` (sudo apt install gnome-screenshot). Grant Screen Recording if prompted."
+        "On GNOME Wayland: open Settings → Privacy → Screen Capture and allow FlowSight Agent. \
+         The app uses the silent portal API (not gnome-screenshot flash). \
+         Optional: install the GNOME extension \"Allow gnome-screenshot\" if you use legacy tools."
     } else if wayland {
-        "On wlroots/Hyprland/Sway install `grim`. On GNOME use `gnome-screenshot`."
+        "On wlroots/Hyprland/Sway install `grim`. On GNOME allow Screen Capture for FlowSight in Settings → Privacy."
     } else {
         "On X11 install `scrot`, `maim`, or `imagemagick`."
     };

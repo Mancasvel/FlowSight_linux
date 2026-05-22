@@ -4135,12 +4135,12 @@
         const streak = computeStreak(week);
         const streakEl = document.getElementById('streakText');
         if (streakEl) streakEl.textContent = `${streak} day${streak === 1 ? '' : 's'} Streak`;
-        if (!isMonitoring && !isPaused) {
-          const history = await invoke('get_today_history');
-          todayTotalSeconds = history.total_seconds || 0;
-        } else if (isPaused) {
-          const history = await invoke('get_today_history');
-          todayTotalSeconds = Math.max(todayTotalSeconds, history.total_seconds || 0);
+        const history = await invoke('get_today_history');
+        todayTotalSeconds = Math.max(todayTotalSeconds, history.total_seconds || 0);
+        currentHistoryData = history;
+        currentWeekData = week;
+        if (document.getElementById('tabSummary')?.classList.contains('active')) {
+          renderHistory(history, week);
         }
       } catch (_) { /* agent may not be init yet */ }
       updateTimerDisplay();
@@ -4892,7 +4892,12 @@
 
         try {
           const capRes = await invoke('ensure_linux_capture_dependencies');
-          if (capRes && capRes.status === 'install_failed' && capRes.message) {
+          if (capRes?.granted_app_ids?.length || capRes?.screencast_app_ids?.length) {
+            console.log('[FlowSight] Capture permissions:', capRes.granted_app_ids, capRes.screencast_app_ids);
+          }
+          if (capRes?.status === 'ok' && capRes?.message) {
+            showToast(String(capRes.message), 'success', 5000);
+          } else if (capRes?.status === 'install_failed' && capRes?.message) {
             showToast(String(capRes.message), 'warning', 8000);
           }
         } catch (ce) {
@@ -5279,7 +5284,9 @@
     }
 
     function hideOnboardingWizard() {
-      document.body.classList.remove('wizard-active');
+      if (!document.getElementById('loginScreen')?.classList.contains('visible')) {
+        document.body.classList.remove('wizard-active');
+      }
       const overlay = document.getElementById('onboardingOverlay');
       overlay?.classList.remove('visible');
       overlay?.setAttribute('aria-hidden', 'true');
@@ -5463,13 +5470,16 @@
     let isSyncing = false;
     let lastGoodSnapshot = null;
     let captureRetryTimeout = null;
-    const CAPTURE_RETRY_DELAY_MS = 2500;
+    const CAPTURE_RETRY_BASE_MS = 8000;
+    const CAPTURE_RETRY_MAX_MS = 60000;
+    let captureRetryAttempts = 0;
 
     function clearCaptureRetry() {
       if (captureRetryTimeout) {
         clearTimeout(captureRetryTimeout);
         captureRetryTimeout = null;
       }
+      captureRetryAttempts = 0;
     }
 
     function isAnalysisFailure(snapshot) {
@@ -5538,10 +5548,15 @@
 
     function scheduleCaptureRetry() {
       if (!isMonitoring || captureRetryTimeout) return;
+      const delay = Math.min(
+        CAPTURE_RETRY_BASE_MS * Math.pow(2, captureRetryAttempts),
+        CAPTURE_RETRY_MAX_MS
+      );
+      captureRetryAttempts += 1;
       captureRetryTimeout = setTimeout(() => {
         captureRetryTimeout = null;
         if (isMonitoring) captureAndAnalyze({ isRetry: true });
-      }, CAPTURE_RETRY_DELAY_MS);
+      }, delay);
     }
 
     async function captureAndAnalyze({ isRetry = false } = {}) {
@@ -5555,7 +5570,10 @@
       const { task, jiraTicket } = getTaskContext();
 
       try {
-        if (!isRetry) log('Taking Context Snapshot (background)...');
+        if (!isRetry) {
+          log('Taking Context Snapshot (background)...');
+          showToast('Capturing screen — AI analysis may take up to a minute.', 'info', 4000);
+        }
 
         const snapshot = await invoke('capture_context_snapshot', {
           userTask: task,
@@ -5563,11 +5581,12 @@
         });
 
         if (isAnalysisFailure(snapshot)) {
-          console.warn('[Sync] Analysis failed — counting time from last known state, retrying soon');
+          console.warn('[Sync] Analysis failed — carry-forward until next minute tick');
           await recordCarryForwardTime(jiraTicket);
-          scheduleCaptureRetry();
           return;
         }
+
+        captureRetryAttempts = 0;
 
         lastGoodSnapshot = {
           description: snapshot.description,
@@ -5580,13 +5599,24 @@
         });
       } catch (e) {
         console.error('[Sync] Error:', e);
-        log('Sync error: ' + e);
+        const errText = String(e);
+        log('Sync error: ' + errText);
+        if (
+          errText.includes('Could not capture') ||
+          errText.includes('Screen Capture') ||
+          errText.includes('portal screenshot')
+        ) {
+          showToast(
+            'Screen capture failed — retrying. FlowSight grants portal permission automatically on start.',
+            'warning',
+            6000
+          );
+        }
         try {
           await recordCarryForwardTime(jiraTicket);
         } catch (saveErr) {
           console.error('[Sync] Failed to record carry-forward time:', saveErr);
         }
-        if (isMonitoring) scheduleCaptureRetry();
       } finally {
         isSyncing = false;
       }

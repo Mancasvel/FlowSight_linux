@@ -3,7 +3,9 @@ mod llama_bin;
 mod llama_port;
 mod llama_windows_job;
 mod screenshot_disk;
-mod screen_capture;
+pub mod screen_capture;
+#[cfg(target_os = "linux")]
+mod linux_silent_capture;
 mod agent;
 mod agent_pure;
 mod jira;
@@ -85,6 +87,8 @@ pub fn run() {
             get_week_summary,
             paths::get_flowsight_user_paths,
             screen_capture::ensure_linux_capture_dependencies,
+            #[cfg(target_os = "linux")]
+            linux_silent_capture::ensure_screencast_ready,
         ])
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
@@ -95,6 +99,21 @@ pub fn run() {
           if let Err(e) = window.set_decorations(true) {
             log::warn!("[FlowSight] set_decorations(true) on Linux: {e}");
           }
+          let granted = screen_capture::linux_auto_grant_screenshot_permissions();
+          if !granted.is_empty() {
+            log::info!(
+              "[FlowSight] Portal screenshot permissions pre-granted for: {}",
+              granted.join(", ")
+            );
+          }
+          log::info!(
+            "[FlowSight] Linux session: gnome={} wayland={} XDG_CURRENT_DESKTOP={:?} WAYLAND_DISPLAY={:?} XDG_SESSION_TYPE={:?}",
+            screen_capture::linux_is_gnome_session(),
+            crate::linux_silent_capture::linux_is_wayland_session(),
+            std::env::var("XDG_CURRENT_DESKTOP"),
+            std::env::var("WAYLAND_DISPLAY"),
+            std::env::var("XDG_SESSION_TYPE"),
+          );
         }
       }
 

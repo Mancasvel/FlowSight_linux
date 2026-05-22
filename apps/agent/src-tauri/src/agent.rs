@@ -302,13 +302,59 @@ pub async fn capture_context_snapshot(
             .or(Some(16)) 
     };
 
-    // Run ALL heavy work on a background thread to avoid blocking the main/UI thread
+    #[cfg(target_os = "linux")]
+    let portal_png = if crate::screen_capture::linux_is_gnome_session() {
+        log::info!("[FlowSight] Capture path: ScreenCast via PipeWire (silent, no portal flash)");
+        match crate::linux_silent_capture::ensure_session().await {
+            Ok(()) => {}
+            Err(e) => log::warn!("[FlowSight] ScreenCast session: {e}"),
+        }
+        crate::linux_silent_capture::capture_monitoring_frame()
+    } else {
+        crate::screen_capture::try_linux_portal_capture().await
+    };
+    #[cfg(not(target_os = "linux"))]
+    let portal_png: Option<Vec<u8>> = None;
+
+    // Vision + sync fallbacks on a worker thread; portal must stay on the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
         use crate::context::get_system_context;
         use std::path::PathBuf;
 
         // 1. Capture Screen
-        let (base64, path_str) = capture_screen()?;
+        let (base64, path_str) = if let Some(bytes) = portal_png {
+            #[cfg(target_os = "linux")]
+            {
+                let finished = if crate::screen_capture::linux_is_gnome_session() {
+                    crate::screen_capture::finish_linux_png_bytes_screencast(bytes)
+                } else {
+                    crate::screen_capture::finish_linux_png_bytes(bytes)
+                };
+                finished?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err("Portal screen capture is not available on this platform.".into());
+            }
+        } else if cfg!(target_os = "linux") && crate::screen_capture::linux_is_gnome_session() {
+            log::warn!("[FlowSight] ScreenCast returned no frame — skipping vision this cycle");
+            return Ok(ContextSnapshot {
+                vector: vec![],
+                dimension: 0,
+                description: "Screen analysis failed. Category: General".to_string(),
+                category: "General".to_string(),
+                analysis_failed: true,
+                metadata: SnapshotMetadata {
+                    task: jira_ticket.clone().or(user_task.clone()),
+                    file: None,
+                    app: None,
+                    branch: None,
+                    language: None,
+                },
+            });
+        } else {
+            capture_screen()?
+        };
         let path = PathBuf::from(&path_str);
 
         // 2. Local vision analysis (visual description + category)
@@ -337,6 +383,16 @@ pub async fn capture_context_snapshot(
         let (description, category) = parse_analysis(&raw_analysis.0);
         let analysis_failed = raw_analysis.1
             || description.eq_ignore_ascii_case("No analysis available");
+
+        if analysis_failed {
+            log::warn!("[FlowSight] Vision analysis failed or empty for this capture");
+        } else {
+            log::info!(
+                "[FlowSight] Vision analysis OK — category={} preview={}",
+                category,
+                description.chars().take(80).collect::<String>()
+            );
+        }
 
         // 3. System Context (Window/App)
         let sys = get_system_context();
@@ -488,13 +544,27 @@ pub fn get_status(state: State<'_, AgentState>) -> Result<serde_json::Value, Str
 
 #[tauri::command]
 pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
-    if let Some(a) = state.lock().unwrap().as_mut() { a.is_running = true; }
+    if let Some(a) = state.lock().unwrap().as_mut() {
+        a.is_running = true;
+    }
+    #[cfg(target_os = "linux")]
+    if crate::linux_silent_capture::linux_use_silent_screencast() {
+        tauri::async_runtime::spawn(async {
+            if let Err(e) = crate::linux_silent_capture::ensure_session().await {
+                log::warn!("[FlowSight] Silent ScreenCast: {e}");
+            }
+        });
+    }
     Ok(true)
 }
 
 #[tauri::command]
 pub fn stop_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
-    if let Some(a) = state.lock().unwrap().as_mut() { a.is_running = false; }
+    if let Some(a) = state.lock().unwrap().as_mut() {
+        a.is_running = false;
+    }
+    #[cfg(target_os = "linux")]
+    crate::linux_silent_capture::stop_session();
     Ok(true)
 }
 
