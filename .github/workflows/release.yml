@@ -95,13 +95,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Download vision models (GGUF)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/fetch-models.mjs
-
-      - name: Build Linux packages and upload to release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build Linux packages (pnpm monorepo)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_JIRA_CLIENT_ID: ${{ secrets.TAURI_JIRA_CLIENT_ID }}
@@ -110,14 +104,20 @@ jobs:
           TAURI_LINEAR_CLIENT_SECRET: ${{ secrets.TAURI_LINEAR_CLIENT_SECRET }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-        with:
-          projectPath: apps/agent
-          tagName: ${{ steps.meta.outputs.tag }}
-          releaseId: ${{ github.event.release.id }}
-          releaseName: FlowSight Agent ${{ steps.meta.outputs.tag }}
-          releaseBody: |
-            Instaladores Linux generados por CI (`.deb` y `.AppImage`).
+        run: pnpm build
 
-            **Requisitos:** GNOME/Wayland, PipeWire, `gstreamer1.0-tools`, `gstreamer1.0-pipewire`.
-          args: --bundles deb,appimage
-          releaseAssetNamePattern: "FlowSight-Agent_[version]_[platform].[ext]"
+      - name: List bundle outputs
+        run: |
+          ls -la apps/agent/src-tauri/target/release/bundle/deb/ || true
+          ls -la apps/agent/src-tauri/target/release/bundle/appimage/ || true
+
+      - name: Upload .deb and AppImage to GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          fail_on_unmatched_files: true
+          files: |
+            apps/agent/src-tauri/target/release/bundle/deb/*.deb
+            apps/agent/src-tauri/target/release/bundle/appimage/*.AppImage
