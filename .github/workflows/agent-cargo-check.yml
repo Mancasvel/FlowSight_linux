@@ -56,7 +56,10 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             pkg-config \
-            patchelf
+            patchelf \
+            gstreamer1.0-tools \
+            gstreamer1.0-pipewire \
+            libpipewire-0.3-0
 
       - uses: swatinem/rust-cache@v2
         with:
