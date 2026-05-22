@@ -10,7 +10,8 @@
 //! de recursos read-only bundlados con el instalador de Tauri se resuelven
 //! vía `resource_local_llm_dir` y requieren `AppHandle`.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::vision_model::{VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME};
 use serde_json::json;
@@ -137,12 +138,31 @@ pub fn local_llm_storage_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn local_llm_has_weights(dir: &std::path::Path) -> bool {
-    dir.join(VISION_GGUF_FILENAME).is_file() && dir.join(VISION_MMPROJ_FILENAME).is_file()
+/// True when the file exists and begins with the GGUF magic (rejects 0-byte Tauri placeholders).
+fn is_valid_gguf_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < 1024 {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok() == Some(()) && magic == *b"GGUF"
+}
+
+fn local_llm_has_valid_weights(dir: &Path) -> bool {
+    is_valid_gguf_file(&dir.join(VISION_GGUF_FILENAME))
+        && is_valid_gguf_file(&dir.join(VISION_MMPROJ_FILENAME))
 }
 
 fn dev_repo_local_llm_root() -> Option<PathBuf> {
-    let check = |dir: &std::path::Path| local_llm_has_weights(&dir.join("local_llm"));
+    let check = |dir: &Path| local_llm_has_valid_weights(&dir.join("local_llm"));
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent()?.to_path_buf();
         for _ in 0..8 {
@@ -168,29 +188,56 @@ fn dev_repo_local_llm_root() -> Option<PathBuf> {
     None
 }
 
-/// Resuelve el directorio de recursos bundlados donde viven los GGUF de visión.
+/// Resuelve el directorio donde viven los GGUF de visión (modelo + mmproj).
 ///
-/// En un `.exe` instalado, Tauri descomprime los `bundle.resources` dentro
-/// de `<install>\resources\`. En dev, caemos al layout del repo (`<repo-root>/local_llm`).
+/// Orden: app data (`~/.local/share/FlowSight/local_llm`), repo dev, bundle Tauri.
+/// Ignora archivos vacíos o inválidos (p. ej. placeholders en `target/debug/local_llm`).
 pub fn resource_local_llm_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut searched: Vec<String> = Vec::new();
+
+    if let Ok(app_llm) = local_llm_storage_dir() {
+        searched.push(app_llm.display().to_string());
+        if local_llm_has_valid_weights(&app_llm) {
+            log::info!(
+                "[FlowSight] Using vision weights from app data: {}",
+                app_llm.display()
+            );
+            return Ok(app_llm);
+        }
+    }
+
+    if let Some(dev) = dev_repo_local_llm_root() {
+        searched.push(dev.display().to_string());
+        if local_llm_has_valid_weights(&dev) {
+            log::info!(
+                "[FlowSight] Using vision weights from dev tree: {}",
+                dev.display()
+            );
+            return Ok(dev);
+        }
+    }
+
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|e| format!("resource_dir unavailable: {}", e))?;
-
     let bundled = resource_dir.join("local_llm");
-    if local_llm_has_weights(&bundled) {
+    searched.push(bundled.display().to_string());
+    if local_llm_has_valid_weights(&bundled) {
+        log::info!(
+            "[FlowSight] Using vision weights from bundle: {}",
+            bundled.display()
+        );
         return Ok(bundled);
     }
 
-    if let Some(dev) = dev_repo_local_llm_root() {
-        return Ok(dev);
-    }
-
     Err(format!(
-        "local_llm vision weights not found (looked in bundled resources at {:?} and dev tree). \
-         Run scripts/fetch-models or place {} and {} under local_llm/.",
-        bundled, VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME
+        "Vision model weights not found or invalid (need real GGUF files, not empty placeholders). \
+         Searched: {}. Run `pnpm --filter @flowsight/agent fetch-models` or copy {} and {} into \
+         ~/.local/share/FlowSight/local_llm/ (you already have valid copies there if a prior setup succeeded).",
+        searched.join("; "),
+        VISION_GGUF_FILENAME,
+        VISION_MMPROJ_FILENAME
     ))
 }
 
