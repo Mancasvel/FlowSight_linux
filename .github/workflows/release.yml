@@ -1,33 +1,53 @@
 name: Release — FlowSight Agent (Linux)
 
 on:
+  # Publicar una release en GitHub → build + adjuntar .deb y .AppImage
   release:
     types: [published]
+  # Alternativa: git tag vX.Y.Z && git push origin vX.Y.Z
+  push:
+    tags:
+      - "v*"
+  # Re-ejecutar manualmente para una tag existente (p. ej. v3.5.0)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de release existente (ej. v3.5.0)"
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-linux-${{ github.event.release.tag_name || github.event.inputs.tag || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: write
 
-# Secrets: TAURI_JIRA_CLIENT_ID, TAURI_JIRA_CLIENT_SECRET,
-# NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY
-# (Opcional: TAURI_LINEAR_*, GITHUB_TOKEN para fetch-models en CI)
+env:
+  FLOWSIGHT_MODELS_REPO: Mancasvel/FlowSight.AI
+  FLOWSIGHT_MODELS_TAG: models-v0.1.0
 
 jobs:
-  build-linux:
+  build-and-upload-linux:
     runs-on: ubuntu-22.04
-    env:
-      TAURI_JIRA_CLIENT_ID: ${{ secrets.TAURI_JIRA_CLIENT_ID }}
-      TAURI_JIRA_CLIENT_SECRET: ${{ secrets.TAURI_JIRA_CLIENT_SECRET }}
-      TAURI_LINEAR_CLIENT_ID: ${{ secrets.TAURI_LINEAR_CLIENT_ID }}
-      TAURI_LINEAR_CLIENT_SECRET: ${{ secrets.TAURI_LINEAR_CLIENT_SECRET }}
-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building FlowSight Agent for tag: $TAG"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
 
       - name: Reject outdated tauri 2.9.x (stale release tag)
         shell: bash
@@ -35,8 +55,7 @@ jobs:
           set -euo pipefail
           f=apps/agent/src-tauri/Cargo.toml
           if grep -qE 'tauri = \{ version = "2\.9' "$f"; then
-            echo "::error title=Stale release tag::Create a **new tag** on the latest \`main\` and publish a **new** GitHub Release."
-            grep -E 'tauri' "$f" || true
+            echo "::error title=Stale release tag::Tag must point to a commit with Tauri 2.10+."
             exit 1
           fi
 
@@ -76,34 +95,29 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build app (deb + AppImage)
-        run: pnpm build
-
-      - name: Upload Linux bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-bundle
-          path: |
-            apps/agent/src-tauri/target/release/bundle/deb/*.deb
-            apps/agent/src-tauri/target/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
-
-  attach-to-release:
-    needs: [build-linux]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Attach installers to release
-        uses: softprops/action-gh-release@v2
+      - name: Download vision models (GGUF)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/fetch-models.mjs
+
+      - name: Build Linux packages and upload to release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_JIRA_CLIENT_ID: ${{ secrets.TAURI_JIRA_CLIENT_ID }}
+          TAURI_JIRA_CLIENT_SECRET: ${{ secrets.TAURI_JIRA_CLIENT_SECRET }}
+          TAURI_LINEAR_CLIENT_ID: ${{ secrets.TAURI_LINEAR_CLIENT_ID }}
+          TAURI_LINEAR_CLIENT_SECRET: ${{ secrets.TAURI_LINEAR_CLIENT_SECRET }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: false
-          files: |
-            artifacts/**/*.deb
-            artifacts/**/*.AppImage
+          projectPath: apps/agent
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseId: ${{ github.event.release.id }}
+          releaseName: FlowSight Agent ${{ steps.meta.outputs.tag }}
+          releaseBody: |
+            Instaladores Linux generados por CI (`.deb` y `.AppImage`).
+
+            **Requisitos:** GNOME/Wayland, PipeWire, `gstreamer1.0-tools`, `gstreamer1.0-pipewire`.
+          args: --bundles deb,appimage
+          releaseAssetNamePattern: "FlowSight-Agent_[version]_[platform].[ext]"

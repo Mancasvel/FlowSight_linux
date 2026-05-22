@@ -31,7 +31,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "gstreamer1.0-tools",
+          "gstreamer1.0-pipewire",
+          "libpipewire-0.3-0"
+        ]
+      }
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "offlineInstaller",
@@ -46,8 +55,6 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../../local_llm/bin/*.exe": "local_llm/bin/",
-      "../../../local_llm/bin/*.dll": "local_llm/bin/",
       "../../../local_llm/Qwen3-VL-2B-Instruct-Q3_K_M.gguf": "local_llm/Qwen3-VL-2B-Instruct-Q3_K_M.gguf",
       "../../../local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf": "local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
     }
