@@ -1970,6 +1970,18 @@
 
     .onboarding-overlay.visible {
       display: flex;
+      flex-direction: column;
+      z-index: 2500;
+    }
+
+    .cloud-activation-overlay.visible {
+      z-index: 2500;
+    }
+
+    /* Bottom nav must not cover wizard/login footers (was z-index 1500 vs overlay 1050). */
+    body.wizard-active .bottom-nav {
+      visibility: hidden;
+      pointer-events: none;
     }
 
     .onboarding-top {
@@ -2013,8 +2025,9 @@
 
     .onboarding-body {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
-      padding: 8px 20px 100px;
+      padding: 8px 20px 16px;
     }
 
     .onboarding-title {
@@ -2118,14 +2131,14 @@
     }
 
     .onboarding-footer {
-      position: fixed;
-      bottom: 0;
-      left: 50%;
-      transform: translateX(-50%);
+      flex-shrink: 0;
       width: 100%;
       max-width: 400px;
-      padding: 12px 20px 20px;
-      background: linear-gradient(to top, hsl(var(--background)) 70%, transparent);
+      margin: 0 auto;
+      padding: 12px 20px max(20px, env(safe-area-inset-bottom, 0px));
+      background: hsl(var(--background));
+      border-top: 1px solid hsl(var(--border));
+      box-sizing: border-box;
     }
 
     .onboarding-continue {
@@ -3696,6 +3709,7 @@
       } else {
         resetLoginSplashCopy();
       }
+      document.body.classList.add('wizard-active');
       document.getElementById('loginScreen')?.classList.add('visible');
     }
 
@@ -3703,6 +3717,9 @@
       document.getElementById('loginScreen')?.classList.remove('visible');
       document.querySelector('.login-splash')?.classList.remove('login-splash--manual');
       setWorkerLoginError('');
+      if (!document.getElementById('onboardingOverlay')?.classList.contains('visible')) {
+        document.body.classList.remove('wizard-active');
+      }
     }
 
     function showFreeProfileState() {
@@ -5089,7 +5106,7 @@
 
     function onboardingCanContinue() {
       switch (onboardingState.step) {
-        case 0: return onboardingState.displayName.trim().length >= 2;
+        case 0: return onboardingState.displayName.trim().length >= 1;
         case 1: {
           if (onboardingState.workRoles.length === 0) return false;
           if (onboardingState.workRoles.includes('other')) {
@@ -5143,10 +5160,13 @@
             placeholder="Your first name" maxlength="40" value="${escapeHtml(onboardingState.displayName)}" autocomplete="name">`;
         const input = document.getElementById('onboardingNameInput');
         input?.focus();
-        input?.addEventListener('input', (e) => {
-          onboardingState.displayName = e.target.value;
+        const syncNameStep = () => {
+          onboardingState.displayName = input?.value ?? '';
           continueBtn.disabled = !onboardingCanContinue();
-        });
+        };
+        input?.addEventListener('input', syncNameStep);
+        input?.addEventListener('keyup', syncNameStep);
+        syncNameStep();
         continueBtn.textContent = 'Continue';
       } else if (step === 1) {
         const showOtherJob = onboardingState.workRoles.includes('other');
@@ -5237,6 +5257,7 @@
     }
 
     function showOnboardingWizard(fromProfile = false) {
+      document.body.classList.add('wizard-active');
       onboardingState.reopening = fromProfile;
       onboardingState.step = 0;
       if (userPreferences) {
@@ -5258,6 +5279,7 @@
     }
 
     function hideOnboardingWizard() {
+      document.body.classList.remove('wizard-active');
       const overlay = document.getElementById('onboardingOverlay');
       overlay?.classList.remove('visible');
       overlay?.setAttribute('aria-hidden', 'true');
