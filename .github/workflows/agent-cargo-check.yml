@@ -1,0 +1,66 @@
+# Compila el crate Tauri del agente en los tres SO; detecta roturas por cfg!/target_os antes del release.
+name: Agent — cargo check (all OS)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/agent/src-tauri/**"
+      - ".github/workflows/agent-cargo-check.yml"
+  pull_request:
+    paths:
+      - "apps/agent/src-tauri/**"
+      - ".github/workflows/agent-cargo-check.yml"
+
+concurrency:
+  group: agent-cargo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            rust: stable
+          - os: windows-latest
+            rust: stable
+          - os: macos-latest
+            rust: stable
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: apps/agent/src-tauri
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Linux — Tauri native deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            pkg-config \
+            patchelf
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent/src-tauri -> target
+
+      - name: cargo check (lib + binaries + tests)
+        run: cargo check --all-targets

@@ -4830,6 +4830,15 @@
         showToast(`Local AI Server Ready${layerSuffix}`, 'success');
 
         try {
+          const capRes = await invoke('ensure_linux_capture_dependencies');
+          if (capRes && capRes.status === 'install_failed' && capRes.message) {
+            showToast(String(capRes.message), 'warning', 8000);
+          }
+        } catch (ce) {
+          console.error('[FlowSight] ensure_linux_capture_dependencies:', ce);
+        }
+
+        try {
           const history = await invoke('get_today_history');
           todayTotalSeconds = Math.max(todayTotalSeconds, history.total_seconds || 0);
         } catch (_) { /* keep local total */ }

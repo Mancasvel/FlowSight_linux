@@ -2,6 +2,7 @@ mod vision_model;
 mod llama_port;
 mod llama_windows_job;
 mod screenshot_disk;
+mod screen_capture;
 mod agent;
 mod agent_pure;
 mod jira;
@@ -82,6 +83,7 @@ pub fn run() {
             get_today_history,
             get_week_summary,
             paths::get_flowsight_user_paths,
+            screen_capture::ensure_linux_capture_dependencies,
         ])
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {

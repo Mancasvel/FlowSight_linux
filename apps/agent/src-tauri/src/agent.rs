@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::path::{Path, PathBuf};
 use tauri::State;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Datelike, Local};
 use rusqlite::{Connection, params};
 use std::io::Write;
@@ -250,40 +249,9 @@ impl FlowSightAgent {
     }
 }
 
-// Capture and analyze screen
-// (Logic moved to Frontend for cross-platform support)
-
+// Capture and analyze screen — platform logic in `screen_capture` (Linux: grim / GNOME D-Bus / …; Windows: `screenshots`).
 fn capture_screen() -> Result<(String, std::path::PathBuf), String> {
-    use screenshots::Screen;
-    
-    let screens = Screen::all().map_err(|e| e.to_string())?;
-    let screen = screens.first().ok_or("No screen")?;
-    let captured = screen.capture().map_err(|e| e.to_string())?;
-    
-    // Convert to DynamicImage
-    let (width, height) = captured.dimensions();
-    let img = image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_raw(width, height, captured.into_raw())
-            .ok_or("Failed to create image")?
-    );
-    
-    let img = img.resize(960, 540, image::imageops::FilterType::Lanczos3);
-
-    let mut png = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-        
-    // println!("[Agent] Captured screenshot size: {} bytes", png.len());
-    
-    // Persist to tmp for debug (optional): junto a datos de la app, no en Escritorio
-    let debug_dir = crate::paths::screenshots_tmp_dir()?;
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let stem = format!("capture_{}", timestamp);
-    let debug_path = crate::screenshot_disk::write_debug_capture_image(&png, &stem, &debug_dir)
-        .unwrap_or_else(|| debug_dir.join("_flowsight_no_disk_debug"));
-
-    Ok((BASE64.encode(&png), debug_path))
+    crate::screen_capture::capture_screen()
 }
 
 #[derive(Serialize, Clone)]

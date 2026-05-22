@@ -4,9 +4,12 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::io::Write;
+
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{LocalFree, HLOCAL};
 
 /// Intenta persistir PNG de depuración. [`None`] = no crear archivo en disco.

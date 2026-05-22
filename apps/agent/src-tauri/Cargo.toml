@@ -26,7 +26,6 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
-screenshots = "0.8"
 base64 = "0.22"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -43,6 +42,7 @@ dotenv = "0.15"
 urlencoding = "2.1"
 
 [target.'cfg(windows)'.dependencies]
+screenshots = "0.8"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
