@@ -73,6 +73,23 @@
       background: hsl(var(--card));
       border-bottom: 1px solid hsl(var(--border));
       user-select: none;
+      position: relative;
+      z-index: 2000;
+    }
+
+    /* Linux uses native SSD (see lib.rs); hide duplicate HTML titlebar. */
+    body.platform-linux .app-titlebar {
+      display: none;
+    }
+
+    body.platform-linux .cloud-activation-overlay {
+      top: 0;
+    }
+
+    .onboarding-overlay:not(.visible),
+    .cloud-activation-overlay:not(.visible),
+    .report-modal-overlay:not(.visible) {
+      pointer-events: none;
     }
 
     .titlebar-brand {
@@ -903,6 +920,14 @@
       background: hsl(var(--background));
       position: relative;
       overflow: hidden;
+      pointer-events: auto;
+    }
+
+    .app-shell button,
+    .app-shell select,
+    .app-shell input,
+    .app-shell .nav-item {
+      pointer-events: auto;
     }
 
     .tab-content {
@@ -936,7 +961,8 @@
       padding: 8px 12px 12px;
       background: hsl(var(--card));
       border-top: 1px solid hsl(var(--border));
-      z-index: 100;
+      z-index: 1500;
+      pointer-events: auto;
     }
 
     .nav-item {
@@ -1607,6 +1633,7 @@
       right: 0;
       bottom: 0;
       z-index: 1000;
+      pointer-events: auto;
       display: none;
       flex-direction: column;
       background: hsl(220 16% 96%);
@@ -1926,11 +1953,19 @@
     /* Onboarding wizard */
     .onboarding-overlay {
       position: fixed;
-      inset: 0;
+      top: 44px;
+      left: 0;
+      right: 0;
+      bottom: 0;
       z-index: 1050;
       display: none;
       flex-direction: column;
       background: hsl(var(--background));
+      pointer-events: auto;
+    }
+
+    body.platform-linux .onboarding-overlay {
+      top: 0;
     }
 
     .onboarding-overlay.visible {
@@ -3339,7 +3374,15 @@
 
     document.documentElement.removeAttribute('native-scrollbar');
 
+    const IS_LINUX = /linux/i.test(navigator.userAgent);
+    if (IS_LINUX) {
+      document.body.classList.add('platform-linux');
+    }
+
     async function initTitlebar() {
+      if (IS_LINUX) {
+        return;
+      }
       const maximizeBtn = document.getElementById('winMaximizeBtn');
       let win;
       try {
@@ -3390,6 +3433,7 @@
         el.addEventListener('mousedown', (e) => {
           if (e.button !== 0) return;
           if (e.target.closest('.titlebar-controls')) return;
+          if (e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
           e.preventDefault();
           win.startDragging();
         });
@@ -5300,8 +5344,6 @@
       await promptOnboardingIfNeeded();
     }
 
-    init();
-
     async function refreshTasks() {
       if (!isPaidActive() || !currentEntitlements?.can_integrations) {
         return;
@@ -5589,8 +5631,12 @@
       if (tabId === 'tabToday') refreshTodayView();
     }
 
-    document.querySelectorAll('.nav-item').forEach(btn => {
-      btn.onclick = () => switchTab(btn.dataset.tab);
+    document.querySelectorAll('.nav-item').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (btn.dataset.tab) switchTab(btn.dataset.tab);
+      });
     });
 
     function formatDuration(totalSeconds) {
@@ -6638,6 +6684,8 @@
         manualLoginBtn.textContent = "Login with Code";
       }
     };
+
+    init();
   </script>
 </body>
 

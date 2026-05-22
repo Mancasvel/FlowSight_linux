@@ -88,6 +88,13 @@ pub fn run() {
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_theme(Some(tauri::Theme::Light));
+        // GNOME/Wayland: frameless custom titlebars often swallow clicks; use SSD on Linux.
+        #[cfg(target_os = "linux")]
+        {
+          if let Err(e) = window.set_decorations(true) {
+            log::warn!("[FlowSight] set_decorations(true) on Linux: {e}");
+          }
+        }
       }
 
       // Log a archivo en TODOS los builds. En release el usuario no ve stderr,
