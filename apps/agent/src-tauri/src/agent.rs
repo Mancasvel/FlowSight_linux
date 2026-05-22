@@ -1402,13 +1402,13 @@ CATEGORY rules: use Coding ONLY for software development (editing code, debuggin
                 {
                     "role": "user",
                     "content": [
-                        { "type": "text", "text": prompt },
                         {
                             "type": "image_url",
                             "image_url": {
                                 "url": format!("data:image/png;base64,{}", base64_img)
                             }
-                        }
+                        },
+                        { "type": "text", "text": prompt }
                     ]
                 }
             ],

@@ -43,6 +43,14 @@ fn tmp_png_name(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{ms}.png"))
 }
 
+fn debug_capture_dir() -> PathBuf {
+    crate::paths::screenshots_tmp_dir().unwrap_or_else(|_| {
+        dirs::desktop_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("flowsight_screenshots_tmp")
+    })
+}
+
 fn process_rgba_dynamic(img: DynamicImage) -> Result<(String, PathBuf), String> {
     let img = img.resize(960, 540, image::imageops::FilterType::Lanczos3);
     let mut png = Vec::new();
@@ -52,10 +60,9 @@ fn process_rgba_dynamic(img: DynamicImage) -> Result<(String, PathBuf), String> 
     )
     .map_err(|e| e.to_string())?;
 
-    let desktop = dirs::desktop_dir().unwrap_or_else(|| PathBuf::from("."));
-    let debug_dir = desktop.join("flowsight_screenshots_tmp");
+    let debug_dir = debug_capture_dir();
     let _ = std::fs::create_dir_all(&debug_dir);
-    let timestamp = chrono::Local::now().format("%H%M%S");
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("capture_{}.png", timestamp);
     let debug_path = debug_dir.join(filename);
     let _ = std::fs::write(&debug_path, &png);
@@ -66,6 +73,32 @@ fn process_rgba_dynamic(img: DynamicImage) -> Result<(String, PathBuf), String> 
 fn process_png_bytes(png: &[u8]) -> Result<(String, PathBuf), String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
     process_rgba_dynamic(img)
+}
+
+#[cfg(target_os = "linux")]
+fn png_is_mostly_black(png: &[u8]) -> bool {
+    let Ok(img) = image::load_from_memory(png) else {
+        return true;
+    };
+    let rgb = img.to_rgb8();
+    let n = rgb.pixels().len();
+    if n == 0 {
+        return true;
+    }
+    let sum: u64 = rgb
+        .pixels()
+        .map(|p| (u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2])) / 3)
+        .sum();
+    let avg = sum as f64 / n as f64;
+    avg < 2.0
+}
+
+#[cfg(target_os = "linux")]
+fn linux_finish_png(bytes: Vec<u8>) -> Option<Result<(String, PathBuf), String>> {
+    if bytes.len() < 500 || png_is_mostly_black(&bytes) {
+        return None;
+    }
+    Some(process_png_bytes(&bytes))
 }
 
 #[cfg(windows)]
@@ -293,12 +326,10 @@ fn paths_from_gdbus_screenshot_reply(s: &str) -> Vec<PathBuf> {
     out
 }
 
-/// GNOME Shell full-screen capture via D-Bus (`flash=false`). Prefer this on GNOME before `grim`,
-/// which can return a valid but black buffer on some multi-output / Mutter setups.
-///
-/// Mutter often writes to the path returned in the D-Bus reply (`filename_used`), not the path we pass in.
+/// GNOME Shell full-screen capture via D-Bus (`flash=false`). Often denied on modern GNOME;
+/// when it succeeds, Mutter may write to `filename_used` instead of the path we pass in.
 #[cfg(target_os = "linux")]
-fn linux_try_gnome_shell_dbus() -> Option<(String, PathBuf)> {
+fn linux_raw_gnome_shell_dbus() -> Option<Vec<u8>> {
     if !tool_in_path("gdbus") {
         return None;
     }
@@ -340,198 +371,186 @@ fn linux_try_gnome_shell_dbus() -> Option<(String, PathBuf)> {
         if !path.exists() {
             continue;
         }
-        let bytes = std::fs::read(&path).ok()?;
-        if bytes.len() < 500 {
-            continue;
+        if let Ok(bytes) = std::fs::read(&path) {
+            if path == tmp {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            if bytes.len() >= 500 {
+                return Some(bytes);
+            }
         }
-        let done = process_png_bytes(&bytes).ok()?;
-        if path == tmp {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        return Some(done);
     }
 
     let _ = std::fs::remove_file(&tmp);
     None
 }
 
+/// `gnome-screenshot -f` — reliable on GNOME Wayland (D-Bus Shell API is often AccessDenied).
+#[cfg(target_os = "linux")]
+fn linux_raw_gnome_screenshot_cli() -> Option<Vec<u8>> {
+    if !tool_in_path("gnome-screenshot") {
+        return None;
+    }
+    let tmp = tmp_png_name("flowsight_gnome_cli");
+    let tmp_s = tmp.to_str()?;
+    let ok = Command::new("gnome-screenshot")
+        .args(["-f", tmp_s])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    let bytes = try_read_tmp_png(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_raw_grim_stdout() -> Option<Vec<u8>> {
+    let out = Command::new("grim").arg("-").output().ok()?;
+    if out.status.success() && out.stdout.len() >= 500 {
+        Some(out.stdout)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_raw_grim_file() -> Option<Vec<u8>> {
+    let tmp = tmp_png_name("flowsight_grim");
+    let _ = std::fs::remove_file(&tmp);
+    let tmp_s = tmp.to_str()?;
+    let out = Command::new("grim").arg(tmp_s).output().ok()?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    let bytes = try_read_tmp_png(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_raw_scrot() -> Option<Vec<u8>> {
+    let tmp = tmp_png_name("flowsight_scrot");
+    let tmp_s = tmp.to_str()?;
+    if !Command::new("scrot")
+        .arg(tmp_s)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    let bytes = try_read_tmp_png(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_capture_to_tmp(cmd: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let tmp = tmp_png_name(&format!("flowsight_{cmd}"));
+    let tmp_s = tmp.to_str()?;
+    let mut c = Command::new(cmd);
+    for a in args {
+        c.arg(a);
+    }
+    c.arg(tmp_s);
+    if !c.status().map(|s| s.success()).unwrap_or(false) {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    let bytes = try_read_tmp_png(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    Some(bytes)
+}
+
 #[cfg(target_os = "linux")]
 fn capture_linux() -> Result<(String, PathBuf), String> {
     let gnome = linux_is_gnome_session();
+    let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+
+    // Order matters: on GNOME+Wayland, `scrot` returns a valid but all-black PNG (~8 KB)
+    // and must not run before `gnome-screenshot`.
+    let mut pipeline: Vec<(&'static str, fn() -> Option<Vec<u8>>)> = Vec::new();
 
     if gnome {
-        if let Some(ok) = linux_try_gnome_shell_dbus() {
-            return Ok(ok);
-        }
+        pipeline.push(("gnome-screenshot", linux_raw_gnome_screenshot_cli));
+        pipeline.push(("gnome-shell-dbus", linux_raw_gnome_shell_dbus));
     }
-
-    // 1a) grim — PNG on stdout (wlroots / many Wayland compositors)
-    if let Ok(out) = Command::new("grim").arg("-").output() {
-        if out.status.success() && out.stdout.len() > 500 {
-            return process_png_bytes(&out.stdout);
-        }
-    }
-
-    // 1b) grim — write to file (some setups fail `grim -` but succeed with a path)
-    let tmp = tmp_png_name("flowsight_grim");
-    let _ = std::fs::remove_file(&tmp);
-    if let Some(tmp_s) = tmp.to_str() {
-        if let Ok(out) = Command::new("grim").arg(tmp_s).output() {
-            if out.status.success() {
-                if let Some(bytes) = try_read_tmp_png(&tmp) {
-                    let _ = std::fs::remove_file(&tmp);
-                    return process_png_bytes(&bytes);
-                }
-            }
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
 
     if !gnome {
-        if let Some(ok) = linux_try_gnome_shell_dbus() {
-            return Ok(ok);
+        pipeline.push(("grim-stdout", linux_raw_grim_stdout));
+        pipeline.push(("grim-file", linux_raw_grim_file));
+        pipeline.push(("gnome-shell-dbus", linux_raw_gnome_shell_dbus));
+    }
+
+    if !wayland {
+        pipeline.push(("scrot", linux_raw_scrot));
+        pipeline.push((
+            "maim",
+            || linux_capture_to_tmp("maim", &[] as &[&str]),
+        ));
+        pipeline.push((
+            "import",
+            || linux_capture_to_tmp("import", &["-window", "root"]),
+        ));
+        pipeline.push((
+            "magick",
+            || linux_capture_to_tmp("magick", &["import", "-window", "root"]),
+        ));
+    }
+
+    pipeline.push((
+        "spectacle",
+        || linux_capture_to_tmp("spectacle", &["-b", "-o"]),
+    ));
+    pipeline.push((
+        "xfce4-screenshooter",
+        || linux_capture_to_tmp("xfce4-screenshooter", &["-f"]),
+    ));
+    pipeline.push((
+        "flameshot",
+        || linux_capture_to_tmp("flameshot", &["screen", "-p"]),
+    ));
+
+    let mut black_rejects = 0u32;
+
+    for (name, capture) in pipeline {
+        let Some(bytes) = capture() else {
+            continue;
+        };
+        if png_is_mostly_black(&bytes) {
+            black_rejects += 1;
+            log::warn!(
+                "[FlowSight] Linux capture '{name}' returned a black frame; trying next method"
+            );
+            continue;
+        }
+        if let Some(Ok(result)) = linux_finish_png(bytes) {
+            log::info!("[FlowSight] Linux screen capture succeeded via {name}");
+            return Ok(result);
         }
     }
 
-    // 3) scrot — X11, typically no full-screen flash
-    let tmp = tmp_png_name("flowsight_scrot");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("scrot")
-        .arg(tmp_s)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 4) maim — X11 (common on i3/Awesome)
-    let tmp = tmp_png_name("flowsight_maim");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("maim")
-        .arg(tmp_s)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 5) ImageMagick 6 — `import`
-    let tmp = tmp_png_name("flowsight_import");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("import")
-        .args(["-window", "root", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 6) ImageMagick 7 — `magick import`
-    let tmp = tmp_png_name("flowsight_magick");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("magick")
-        .args(["import", "-window", "root", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 7) KDE Plasma — batch / non-interactive
-    let tmp = tmp_png_name("flowsight_kde");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("spectacle")
-        .args(["-b", "-o", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 8) Xfce
-    let tmp = tmp_png_name("flowsight_xfce");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("xfce4-screenshooter")
-        .args(["-f", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 9) gnome-screenshot CLI — often shows a white flash; kept as fallback only
-    let tmp = tmp_png_name("flowsight_gnome_cli");
-    let tmp_s = match tmp.to_str() {
-        Some(s) => s,
-        None => return Err("Invalid temp path".into()),
-    };
-    if Command::new("gnome-screenshot")
-        .args(["-f", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    // 10) flameshot — full screen to path (no GUI when path is set)
-    let tmp = tmp_png_name("flowsight_flameshot");
-    let tmp_s = tmp.to_str().ok_or("Invalid temp path")?;
-    if Command::new("flameshot")
-        .args(["screen", "-p", tmp_s])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if let Some(bytes) = try_read_tmp_png(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return process_png_bytes(&bytes);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
-
-    let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
-    let hint = if wayland {
-        "On Wayland install `grim` (wlroots/sway/Hyprland) or `gnome-screenshot` (GNOME). Example: sudo apt install grim"
+    let hint = if gnome && wayland {
+        "On GNOME Wayland use `gnome-screenshot` (sudo apt install gnome-screenshot). Grant Screen Recording if prompted."
+    } else if wayland {
+        "On wlroots/Hyprland/Sway install `grim`. On GNOME use `gnome-screenshot`."
     } else {
-        "On X11 install `scrot`, `maim`, or `imagemagick` (import/magick). Example: sudo apt install scrot"
+        "On X11 install `scrot`, `maim`, or `imagemagick`."
     };
 
-    Err(format!(
-        "Could not capture the screen ({hint}). On GNOME, D-Bus is tried first, then grim; otherwise grim then D-Bus; then scrot, maim, import, magick, spectacle, xfce, gnome-screenshot, flameshot."
-    ))
+    let extra = if black_rejects > 0 {
+        format!(
+            " {black_rejects} method(s) returned black frames (common: scrot on Wayland).",
+        )
+    } else {
+        String::new()
+    };
+
+    Err(format!("Could not capture the screen ({hint}).{extra}"))
 }
