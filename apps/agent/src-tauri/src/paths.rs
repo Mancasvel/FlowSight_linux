@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use crate::vision_model::{VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
 
@@ -127,12 +128,50 @@ pub fn prune_screenshots_tmp_older_than(max_age: std::time::Duration) -> Result<
     Ok(removed)
 }
 
-/// Resuelve el directorio de recursos bundlados donde vive `local_llm/`.
+/// Writable `local_llm/` under app data (Linux/macOS: downloaded `llama-server` lands in `bin/`).
+pub fn local_llm_storage_dir() -> Result<PathBuf, String> {
+    let dir = app_data_dir()?.join("local_llm");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {:?}: {}", dir, e))?;
+    }
+    Ok(dir)
+}
+
+fn local_llm_has_weights(dir: &std::path::Path) -> bool {
+    dir.join(VISION_GGUF_FILENAME).is_file() && dir.join(VISION_MMPROJ_FILENAME).is_file()
+}
+
+fn dev_repo_local_llm_root() -> Option<PathBuf> {
+    let check = |dir: &std::path::Path| local_llm_has_weights(&dir.join("local_llm"));
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent()?.to_path_buf();
+        for _ in 0..8 {
+            if check(&dir) {
+                return Some(dir.join("local_llm"));
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd;
+        for _ in 0..6 {
+            if check(&dir) {
+                return Some(dir.join("local_llm"));
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    None
+}
+
+/// Resuelve el directorio de recursos bundlados donde viven los GGUF de visión.
 ///
 /// En un `.exe` instalado, Tauri descomprime los `bundle.resources` dentro
-/// de `<install>\resources\`. En dev, `resource_dir` apunta al target de
-/// cargo; por eso para el caso de desarrollo caemos al layout del repo
-/// (`<repo-root>\local_llm`) si los bundleados no están.
+/// de `<install>\resources\`. En dev, caemos al layout del repo (`<repo-root>/local_llm`).
 pub fn resource_local_llm_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
@@ -140,28 +179,18 @@ pub fn resource_local_llm_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("resource_dir unavailable: {}", e))?;
 
     let bundled = resource_dir.join("local_llm");
-    if bundled.join("bin").join("llama-server.exe").exists() {
+    if local_llm_has_weights(&bundled) {
         return Ok(bundled);
     }
 
-    // Fallback dev: subir desde apps/agent/src-tauri/target/.../<exe> hasta
-    // encontrar `local_llm/bin/llama-server.exe`. Solo se usa en dev.
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        for _ in 0..8 {
-            let candidate = dir.join("local_llm");
-            if candidate.join("bin").join("llama-server.exe").exists() {
-                return Ok(candidate);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
+    if let Some(dev) = dev_repo_local_llm_root() {
+        return Ok(dev);
     }
 
     Err(format!(
-        "local_llm runtime not found (looked in bundled resources at {:?} and dev tree)",
-        bundled
+        "local_llm vision weights not found (looked in bundled resources at {:?} and dev tree). \
+         Run scripts/fetch-models or place {} and {} under local_llm/.",
+        bundled, VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME
     ))
 }
 

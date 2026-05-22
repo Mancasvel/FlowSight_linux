@@ -1,4 +1,5 @@
 mod vision_model;
+mod llama_bin;
 mod llama_port;
 mod llama_windows_job;
 mod screenshot_disk;

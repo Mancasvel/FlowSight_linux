@@ -1073,16 +1073,13 @@ fn spawn_llama_managed_child(
     gpu_layers: i32,
     vulkan_visible_device_index: Option<&str>,
 ) -> Result<std::process::Child, String> {
-    // Runtime (binarios + pesos) empacados como Tauri bundle resources. En
-    // dev cae al layout del repo autom\u00e1ticamente.
-    let local_llm_dir = crate::paths::resource_local_llm_dir(app)?;
-    let bin_path = local_llm_dir.join("bin").join("llama-server.exe");
-    let model_path = local_llm_dir.join(VISION_GGUF_FILENAME);
-    let mmproj_path = local_llm_dir.join(VISION_MMPROJ_FILENAME);
-
-    if !bin_path.exists() {
-        return Err(format!("llama-server not found at {:?}. Reinstall FlowSight Agent.", bin_path));
-    }
+    let weights_dir = crate::paths::resource_local_llm_dir(app)?;
+    let bin_path = crate::llama_bin::ensure_llama_server(
+        app,
+        crate::paths::local_llm_storage_dir()?.join("bin"),
+    )?;
+    let model_path = weights_dir.join(VISION_GGUF_FILENAME);
+    let mmproj_path = weights_dir.join(VISION_MMPROJ_FILENAME);
     if !model_path.exists() {
         return Err(format!("Vision weights not found at {:?}. Reinstall FlowSight Agent.", model_path));
     }
@@ -1147,7 +1144,12 @@ fn spawn_llama_managed_child(
                 return Ok(child);
             }
             Err(e) => {
-                let msg = format!("Failed to start server: {}", e);
+                let hint = if e.raw_os_error() == Some(13) {
+                    " (permission denied — on Linux use a native llama-server, not the Windows .exe in local_llm/bin)"
+                } else {
+                    ""
+                };
+                let msg = format!("Failed to start server: {}{}", e, hint);
                 last_err = Some(msg.clone());
                 if (attempt + 1) < LLAMA_LISTEN_PORT_SPAWN_ATTEMPTS && crate::llama_port::tcp_bind_addr_in_use(&e)
                 {

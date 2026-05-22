@@ -40,8 +40,11 @@ tiny_http = "0.12"
 open = "5.0"
 dotenv = "0.15"
 urlencoding = "2.1"
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
+zip = "2"
 screenshots = "0.8"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
