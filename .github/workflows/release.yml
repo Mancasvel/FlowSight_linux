@@ -106,6 +106,9 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         run: pnpm build
 
+      - name: Smoke test MCP in the packaged executable
+        run: node scripts/check-mcp-stdio.mjs apps/agent/src-tauri/target/release/app
+
       - name: List bundle outputs
         run: |
           ls -la apps/agent/src-tauri/target/release/bundle/deb/ || true

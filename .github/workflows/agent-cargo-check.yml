@@ -71,3 +71,6 @@ jobs:
 
       - name: cargo check (lib + binaries + tests)
         run: cargo check --all-targets
+
+      - name: MCP protocol and report tests
+        run: cargo test --lib mcp::tests

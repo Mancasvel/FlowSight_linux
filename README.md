@@ -13,8 +13,8 @@ FlowSight is a desktop application that helps distributed engineering
 teams understand how their work flows, without the surveillance baggage of
 traditional productivity tools. **All sensitive processing happens on the
 developer's machine**: screen context, git metadata, and activity summaries
-are analyzed by a bundled local LLM and never leave the device unless the
-user explicitly chooses to sync aggregate signals.
+are analyzed by a bundled local LLM. Cloud sync is opt-in; connecting an
+external AI through MCP can also send the requested report data to that AI.
 
 ---
 
@@ -31,6 +31,13 @@ user explicitly chooses to sync aggregate signals.
   backend only for users who join a team.
 - **Self-hostable backend** — the Community Edition can run against your own
   Supabase instance.
+
+## Bring your own AI (MCP)
+
+The installed app includes a read-only [FlowSight MCP server](docs/MCP.md).
+Open Settings > Connect your AI for the exact command to use in a compatible
+desktop AI client. No extra runtime is required, and activity descriptions
+and ticket IDs are excluded by default.
 
 ## Status
 
