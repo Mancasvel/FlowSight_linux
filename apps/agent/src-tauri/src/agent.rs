@@ -321,11 +321,16 @@ pub async fn capture_context_snapshot(
         use crate::context::get_system_context;
         use std::path::PathBuf;
 
+        #[cfg(target_os = "linux")]
+        let is_gnome_session = crate::screen_capture::linux_is_gnome_session();
+        #[cfg(not(target_os = "linux"))]
+        let is_gnome_session = false;
+
         // 1. Capture Screen
         let (base64, path_str) = if let Some(bytes) = portal_png {
             #[cfg(target_os = "linux")]
             {
-                let finished = if crate::screen_capture::linux_is_gnome_session() {
+                let finished = if is_gnome_session {
                     crate::screen_capture::finish_linux_png_bytes_screencast(bytes)
                 } else {
                     crate::screen_capture::finish_linux_png_bytes(bytes)
@@ -336,7 +341,7 @@ pub async fn capture_context_snapshot(
             {
                 return Err("Portal screen capture is not available on this platform.".into());
             }
-        } else if cfg!(target_os = "linux") && crate::screen_capture::linux_is_gnome_session() {
+        } else if is_gnome_session {
             log::warn!("[FlowSight] ScreenCast returned no frame — skipping vision this cycle");
             return Ok(ContextSnapshot {
                 vector: vec![],
