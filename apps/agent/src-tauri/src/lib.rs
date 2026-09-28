@@ -92,7 +92,6 @@ pub fn run() {
         ])
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_theme(Some(tauri::Theme::Light));
         // GNOME/Wayland: frameless custom titlebars often swallow clicks; use SSD on Linux.
         #[cfg(target_os = "linux")]
         {
