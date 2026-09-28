@@ -65,5 +65,9 @@ jobs:
         with:
           workspaces: apps/agent/src-tauri -> target
 
+      - name: Prepare compile-only model resource stubs
+        working-directory: .
+        run: node scripts/prepare-ci-resource-stubs.mjs
+
       - name: cargo check (lib + binaries + tests)
         run: cargo check --all-targets
