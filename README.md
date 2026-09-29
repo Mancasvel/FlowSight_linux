@@ -1,6 +1,6 @@
-# FlowSight
+# FlowSight (Linux)
 
-**Privacy-first developer productivity intelligence — runs locally on your machine.**
+**Privacy-first productivity intelligence — runs locally on Linux.**
 
 
 
@@ -20,10 +20,10 @@ external AI through MCP can also send the requested report data to that AI.
 
 ## Features
 
-- **100% local inference** — local `llama.cpp` + quantized Qwen3.5-2B GGUF
+- **100% local inference** — local `llama.cpp` + quantized Qwen3-VL-2B-Instruct GGUF
   model. No cloud roundtrips for sensitive data.
 - **Desktop-native** — Tauri 2 (Rust) shell, Vite frontend, SQLite for local
-  state. Installs as a single `.msi` on Windows.
+  state. Ships as `.deb` and `.AppImage` packages for x86-64 Linux.
 - **Activity-oriented, not surveillance-oriented** — the agent surfaces
   meaningful work units (branches, PRs, focus windows) rather than keystroke
   counts.
@@ -50,22 +50,21 @@ v1.0. Track progress on the [Releases](../../releases) page.
 
 ### Prerequisites
 
-- **Windows 10/11** (Linux and macOS are on the roadmap).
+- **Linux x86-64** with the Tauri/WebKitGTK and screen-capture dependencies.
 - **Rust** stable (for building the Tauri shell).
 - **Node.js** 18+ and **pnpm** 8+.
-- **Python** 3.11+ (runs the prebuild script that fetches the LLM model).
 
 ### Install and run
 
 ```bash
-git clone https://github.com/Mancasvel/FlowSight.AI.git
-cd FlowSight.AI
+git clone https://github.com/Mancasvel/FlowSight_linux.git
+cd FlowSight_linux
 pnpm install
 pnpm dev
 ```
 
-The dev command starts the agent with hot reload. The first run downloads
-the GGUF model from the repository's GitHub Release (see `scripts/fetch-models.mjs`).
+The dev command starts the agent with hot reload. Building the app downloads
+the GGUF model from the FlowSight model release (see `scripts/fetch-models.mjs`).
 
 ### Build a release installer
 
@@ -73,9 +72,10 @@ the GGUF model from the repository's GitHub Release (see `scripts/fetch-models.m
 pnpm build
 ```
 
-The installer lands in `apps/agent/src-tauri/target/release/bundle/`. It
-bundles `llama-server.exe`, the required DLLs, and the GGUF model into the
-MSI, so the end user does **not** need any runtime download.
+The `.deb` and `.AppImage` land in `apps/agent/src-tauri/target/release/bundle/`.
+Both packages include the Qwen3-VL-2B-Instruct weights and visual projector.
+On first use, the app downloads a pinned Linux `llama.cpp` runtime if one is
+not already present. Inference runs locally after that download.
 
 ---
 
@@ -91,12 +91,12 @@ MSI, so the end user does **not** need any runtime download.
 +---------------+---------------+
                 |
                 v
-     %LOCALAPPDATA%\FlowSight\
+     ~/.local/share/FlowSight/
      (logs, db, cache — local only)
 ```
 
 The heavy lifting (context summarization, PII filtering, intent inference)
-runs in-process against the local `llama-server.exe`. Only already-filtered
+runs against the local `llama-server`. Only already-filtered
 aggregates reach the cloud backend, and only when the user belongs to a
 team.
 
@@ -107,7 +107,7 @@ apps/
   agent/          Tauri desktop app (Rust + Vite frontend)
   dashboard/      Next.js team dashboard (optional)
 local_llm/
-  bin/            llama-server.exe + DLLs (committed, ~50 MB)
+  bin/            Optional local development runtime
   *.gguf          Local model weights (fetched at build time, not committed)
 scripts/
   fetch-models.mjs  Prebuild hook (Node-only): downloads GGUF from GitHub Releases

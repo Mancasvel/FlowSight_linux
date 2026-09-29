@@ -35,7 +35,7 @@ jobs:
           cp -a "$(dirname "$server")/." local_llm/bin/
           chmod +x local_llm/bin/llama-server
           local_llm/bin/llama-server --version
-      - name: Fetch and verify Qwen3.5 weights
+      - name: Fetch and verify Qwen3-VL-2B-Instruct weights
         run: node scripts/fetch-models.mjs
       - name: Prove local multimodal inference
         run: node scripts/check-local-vision.mjs

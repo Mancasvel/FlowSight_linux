@@ -10,8 +10,8 @@ const modelDir = join(root, 'local_llm');
 mkdirSync(modelDir, { recursive: true });
 
 for (const name of [
-  'Qwen3.5-2B-Q6_K.gguf',
-  'mmproj-Qwen3.5-2B-Q8_0.gguf',
+  'Qwen3VL-2B-Instruct-Q4_K_M.gguf',
+  'mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf',
 ]) {
   const file = join(modelDir, name);
   if (!existsSync(file)) writeFileSync(file, '');
