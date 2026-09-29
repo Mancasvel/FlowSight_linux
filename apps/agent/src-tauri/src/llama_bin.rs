@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use tauri::AppHandle;
 use tauri::Emitter;
 
-// Qwen3.5 requires a recent llama.cpp runtime. Pin it, rather than allowing
+// Qwen3-VL requires a recent llama.cpp runtime. Pin it, rather than allowing
 // an older cached runtime or a future incompatible latest release.
 const LLAMA_RELEASE_TAG: &str = "b10666";
 

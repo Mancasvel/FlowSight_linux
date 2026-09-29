@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "FlowSight Agent",
-  "version": "5.0.2",
+  "version": "5.0.3",
   "identifier": "ai.flowsight.agent",
   "build": {
     "frontendDist": "../dist",
@@ -54,8 +54,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../../local_llm/Qwen3.5-2B-Q6_K.gguf": "local_llm/Qwen3.5-2B-Q6_K.gguf",
-      "../../../local_llm/mmproj-Qwen3.5-2B-Q8_0.gguf": "local_llm/mmproj-Qwen3.5-2B-Q8_0.gguf",
+      "../../../local_llm/Qwen3VL-2B-Instruct-Q4_K_M.gguf": "local_llm/Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+      "../../../local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf": "local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
       "../../../local_llm/APACHE-2.0.md": "local_llm/APACHE-2.0.md",
       "../../../local_llm/MODEL_NOTICE.md": "local_llm/MODEL_NOTICE.md"
     }
