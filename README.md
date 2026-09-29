@@ -120,7 +120,7 @@ scripts/
 All user-facing settings live in the desktop app. Local state is persisted
 under:
 
-- **Windows:** `%LOCALAPPDATA%\FlowSight\`
+- **Linux:** `~/.local/share/FlowSight/`
 - Logs: `server.log`, `agent_error.log`, `crash.log`
 - Database: `dev-agent.db` (SQLite)
 
@@ -175,7 +175,8 @@ publish a fork, please pick a different name for your distribution.
 
 ## Links
 
-- **Product website:** *coming soon*
+- **Product website:** https://flowsight.site
+- **Buy me a coffee on Ko-fi:** https://ko-fi.com/mancasvel
 - **Commercial inquiries:** manuel@flowsight.site
 - **Security reports:** manuel@flowsight.site
 - **Legal (CLA questions):** manuel@flowsight.site
