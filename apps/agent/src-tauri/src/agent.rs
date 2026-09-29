@@ -996,6 +996,10 @@ fn configure_llama_command(
         .arg(model_path)
         .arg("--mmproj")
         .arg(mmproj_path)
+        .arg("--alias")
+        .arg(LLAMA_CHAT_MODEL_ID)
+        .arg("--reasoning-budget")
+        .arg("0")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
@@ -1151,7 +1155,7 @@ fn spawn_llama_managed_child(
     let weights_dir = crate::paths::resource_local_llm_dir(app)?;
     let bin_path = crate::llama_bin::ensure_llama_server(
         app,
-        crate::paths::local_llm_storage_dir()?.join("bin"),
+        crate::paths::local_llm_storage_dir()?.join("bin-b10666"),
     )?;
     let model_path = weights_dir.join(VISION_GGUF_FILENAME);
     let mmproj_path = weights_dir.join(VISION_MMPROJ_FILENAME);

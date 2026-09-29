@@ -1,0 +1,41 @@
+name: Model smoke — Linux x64
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/agent/src-tauri/src/vision_model.rs'
+      - 'scripts/fetch-models.mjs'
+      - 'scripts/check-local-vision.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fetch pinned llama.cpp runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime local_llm/bin
+          gh release download b10666 --repo ggml-org/llama.cpp \
+            -p 'llama-b10666-bin-ubuntu-x64.tar.gz' -D runtime
+          tar -xzf runtime/llama-b10666-bin-ubuntu-x64.tar.gz -C runtime
+          server="$(find runtime -type f -name llama-server -print -quit)"
+          test -n "$server"
+          cp -a "$(dirname "$server")/." local_llm/bin/
+          chmod +x local_llm/bin/llama-server
+          local_llm/bin/llama-server --version
+      - name: Fetch and verify Qwen3.5 weights
+        run: node scripts/fetch-models.mjs
+      - name: Prove local multimodal inference
+        run: node scripts/check-local-vision.mjs

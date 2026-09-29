@@ -20,7 +20,7 @@ external AI through MCP can also send the requested report data to that AI.
 
 ## Features
 
-- **100% local inference** — bundled `llama.cpp` + a small Qwen3-VL GGUF
+- **100% local inference** — local `llama.cpp` + quantized Qwen3.5-2B GGUF
   model. No cloud roundtrips for sensitive data.
 - **Desktop-native** — Tauri 2 (Rust) shell, Vite frontend, SQLite for local
   state. Installs as a single `.msi` on Windows.

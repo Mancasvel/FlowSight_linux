@@ -9,7 +9,9 @@ use flate2::read::GzDecoder;
 use tauri::AppHandle;
 use tauri::Emitter;
 
-const GITHUB_LATEST: &str = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest";
+// Qwen3.5 requires a recent llama.cpp runtime. Pin it, rather than allowing
+// an older cached runtime or a future incompatible latest release.
+const LLAMA_RELEASE_TAG: &str = "b10666";
 
 pub fn exe_name() -> &'static str {
     if cfg!(windows) {
@@ -117,26 +119,8 @@ fn validate_binary(path: &Path) -> Result<(), String> {
     ))
 }
 
-fn fetch_latest_tag() -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("FlowSight-Agent/1.0 (llama.cpp binary setup)")
-        .timeout(Duration::from_secs(45))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let j: serde_json::Value = client
-        .get(GITHUB_LATEST)
-        .send()
-        .map_err(|e| format!("GitHub API: {e}"))?
-        .json()
-        .map_err(|e| e.to_string())?;
-    j["tag_name"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "releases/latest missing tag_name".to_string())
-}
-
 fn release_urls(tag: &str) -> Vec<(&'static str, String)> {
-    let base = format!("https://github.com/ggerganov/llama.cpp/releases/download/{tag}");
+    let base = format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}");
 
     #[cfg(windows)]
     {
@@ -273,8 +257,7 @@ pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<Path
         }),
     );
 
-    let tag = fetch_latest_tag()?;
-    let candidates = release_urls(&tag);
+    let candidates = release_urls(LLAMA_RELEASE_TAG);
     if candidates.is_empty() {
         return Err("Unsupported OS for automatic llama-server download.".to_string());
     }
