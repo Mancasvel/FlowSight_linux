@@ -1,8 +1,6 @@
 name: Linux session and UI verification
 
 on:
-  push:
-    branches: [fix/session-and-ui-updates]
   pull_request:
     paths:
       - apps/agent/**
@@ -63,6 +61,8 @@ jobs:
       - name: Link native Linux desktop binary
         working-directory: apps/agent/src-tauri
         run: cargo build --locked
+      - name: Native Linux binary MCP startup
+        run: node scripts/check-mcp-stdio.mjs apps/agent/src-tauri/target/debug/app
       - name: Install browser for renderer checks
         run: corepack pnpm exec playwright install --with-deps chromium
       - name: Session and onboarding renderer verification

@@ -450,6 +450,7 @@ pub fn save_activity(app: tauri::AppHandle, state: State<'_, AgentState>, descri
         );
     };
     let duration = duration_seconds.unwrap_or(30).clamp(1, 300);
+    let active_app = active_app.filter(|name| !crate::privacy::application_is_excluded(&a.db_path, Some(name)));
     a.reports_sent += 1;
     let report_id = a
         .save_report(&description, &activity_type, jira_ticket, duration)
