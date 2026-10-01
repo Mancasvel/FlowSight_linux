@@ -59,6 +59,8 @@ jobs:
         run: corepack pnpm install --frozen-lockfile
       - name: Renderer tests
         run: node --test apps/agent/src/renderer/*.test.mjs
+      - name: Browser extension lifecycle tests
+        run: node --test apps/agent/browser-extension/*.test.mjs
       - name: Renderer production build
         run: corepack pnpm --filter @flowsight/agent exec vite build
       - name: Link native Linux desktop binary
@@ -82,6 +84,7 @@ jobs:
           curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null
           node scripts/verify-adda-renderer.mjs
           node scripts/verify-session-onboarding.mjs
+          node scripts/verify-total-focus-extension.mjs
           node scripts/verify-localization.mjs
           node scripts/verify-coach-conversation.mjs
           node scripts/verify-linked-session.mjs

@@ -57,7 +57,17 @@
       "../../../local_llm/Qwen3VL-2B-Instruct-Q4_K_M.gguf": "local_llm/Qwen3VL-2B-Instruct-Q4_K_M.gguf",
       "../../../local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf": "local_llm/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
       "../../../local_llm/APACHE-2.0.md": "local_llm/APACHE-2.0.md",
-      "../../../local_llm/MODEL_NOTICE.md": "local_llm/MODEL_NOTICE.md"
+      "../../../local_llm/MODEL_NOTICE.md": "local_llm/MODEL_NOTICE.md",
+      "../browser-extension/manifest.json": "browser-extension/manifest.json",
+      "../browser-extension/worker.js": "browser-extension/worker.js",
+      "../browser-extension/options.html": "browser-extension/options.html",
+      "../browser-extension/options.js": "browser-extension/options.js",
+      "../browser-extension/blocked.html": "browser-extension/blocked.html",
+      "../browser-extension/blocked.js": "browser-extension/blocked.js",
+      "../browser-extension/focus.css": "browser-extension/focus.css",
+      "../browser-extension/icon16.png": "browser-extension/icon16.png",
+      "../browser-extension/icon48.png": "browser-extension/icon48.png",
+      "../browser-extension/icon128.png": "browser-extension/icon128.png"
     }
   }
 }
