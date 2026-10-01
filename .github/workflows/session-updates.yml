@@ -69,7 +69,7 @@ jobs:
         env:
           FLOWSIGHT_RENDERER_URL: http://127.0.0.1:1436
         run: |
-          corepack pnpm --filter @flowsight/agent exec vite --host 127.0.0.1 --port 1436 > /tmp/flowsight-vite.log 2>&1 &
+          corepack pnpm --filter @flowsight/agent exec vite preview --host 127.0.0.1 --port 1436 > /tmp/flowsight-vite.log 2>&1 &
           renderer_pid=$!
           trap 'kill "$renderer_pid" 2>/dev/null || true' EXIT
           for attempt in $(seq 1 30); do
