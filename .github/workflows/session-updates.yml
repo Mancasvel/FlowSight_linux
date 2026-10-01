@@ -38,6 +38,12 @@ jobs:
       - name: Native Linux compilation
         working-directory: apps/agent/src-tauri
         run: cargo check --locked --all-targets
+      - name: Planner and persistence format
+        working-directory: apps/agent/src-tauri
+        run: rustfmt --check --edition 2021 src/local_agent/mod.rs src/local_agent/state.rs src/local_agent/session_plan.rs src/secure_config.rs src/desktop_presence.rs src/privacy.rs src/telemetry.rs src/report_schedule.rs
+      - name: Native Linux Clippy
+        working-directory: apps/agent/src-tauri
+        run: cargo clippy --locked --all-targets
       - name: Rust library tests
         working-directory: apps/agent/src-tauri
         run: cargo test --locked --lib

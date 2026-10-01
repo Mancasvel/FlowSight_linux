@@ -4220,7 +4220,8 @@
       resumeSessionTimer();
     }
 
-    function pauseMonitoring() {
+    async function pauseMonitoring() {
+      await invoke('stop_monitoring');
       isMonitoring = false;
       isPaused = true;
       clearCaptureRetry();
@@ -4252,6 +4253,7 @@
       if (badge) { badge.textContent = 'Off'; badge.className = 'badge badge-default'; }
       updatePlayButtonState();
       try {
+        await invoke('stop_monitoring');
         await invoke('stop_server');
         showToast('Tracking stopped', 'success');
       } catch (e) {
@@ -4271,6 +4273,7 @@
           await startMonitoringFull();
           return;
         }
+        await invoke('start_monitoring');
         isMonitoring = true;
         isPaused = false;
         document.getElementById('statStatus').textContent = 'On';
@@ -5074,6 +5077,7 @@
           todayTotalSeconds = Math.max(todayTotalSeconds, history.total_seconds || 0);
         } catch (_) { /* keep local total */ }
 
+        await invoke('start_monitoring');
         isMonitoring = true;
         isPaused = false;
         document.getElementById('statStatus').textContent = 'On';
@@ -5552,20 +5556,24 @@
 
 
     let portableWeeklyReportBusy = false;
+    let portableWeeklyRetryAt = 0;
     async function checkPortableWeeklyReport() {
-      if(portableWeeklyReportBusy) return;
-      const schedule = await invoke('get_weekly_report_schedule');
-      if(!isWeeklyReportDue(schedule,new Date())) return;
+      if(portableWeeklyReportBusy || Date.now() < portableWeeklyRetryAt) return;
       portableWeeklyReportBusy = true;
-      const startedAt = new Date().toISOString();
       try {
-      const payload = await invoke('generate_local_status_report',{periodDays:7});
+        const schedule = await invoke('get_weekly_report_schedule');
+        if(!isWeeklyReportDue(schedule,new Date())) return;
+        const startedAt = new Date().toISOString();
+        const payload = await invoke('generate_local_status_report',{periodDays:7});
         const model = createStatusReportViewModel(payload,{userName:currentUser?.display_name||'User',todayDate:currentHistoryData?.date});
         const doc = renderStatusReportPdf(new jsPDF(),model);
         const fileDate = String(payload?.local_data?.period_end || currentHistoryData?.date || '').match(/\d{4}-\d{2}-\d{2}/)?.[0] || new Date().toISOString().slice(0,10);
         const filename = 'FlowSight_Work-Report_' + fileDate + '.pdf';
         await invoke('save_scheduled_report_pdf',{revision:schedule.revision,startedAt,filename,bytes:Array.from(new Uint8Array(doc.output('arraybuffer')))});
         weeklyReportSchedule = await invoke('get_weekly_report_schedule');
+      } catch(error) {
+        portableWeeklyRetryAt = Date.now() + 5 * 60 * 1000;
+        console.warn('Scheduled work report could not be saved; retrying in five minutes.',error);
       } finally { portableWeeklyReportBusy=false; }
     }
     document.getElementById('focusAlertsToggle').addEventListener('change',async(e)=>{
