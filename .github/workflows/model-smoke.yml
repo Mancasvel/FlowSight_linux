@@ -7,6 +7,10 @@ on:
       - 'apps/agent/src-tauri/src/vision_model.rs'
       - 'scripts/fetch-models.mjs'
       - 'scripts/check-local-vision.mjs'
+      - 'apps/agent/src-tauri/src/local_agent/session_plan.rs'
+      - 'scripts/prepare-session-plan-harness.py'
+      - 'scripts/probe-session-suggestions.mjs'
+      - '.github/workflows/model-smoke.yml'
 
 permissions:
   contents: read
@@ -22,6 +26,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .impeccable/review/suggestions-harness -> target
       - name: Fetch pinned llama.cpp runtime
         shell: bash
         run: |
@@ -39,3 +47,18 @@ jobs:
         run: node scripts/fetch-models.mjs
       - name: Prove local multimodal inference
         run: node scripts/check-local-vision.mjs
+      - name: Build actual planner request and validation harness
+        run: |
+          python3 scripts/prepare-session-plan-harness.py
+          cargo build --manifest-path .impeccable/review/suggestions-harness/Cargo.toml --release
+      - name: Verify ADDA suggestions with native Linux Qwen
+        env:
+          FLOWSIGHT_PLAN_REVISE: '1'
+        run: node scripts/probe-session-suggestions.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-qwen-session-evidence
+          path: |
+            .impeccable/review/suggestions-qwen.json
+            .impeccable/review/suggestions-harness/source-manifest.json
