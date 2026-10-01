@@ -17,6 +17,7 @@
     "@fontsource/plus-jakarta-sans": "5",
     "@supabase/supabase-js": "^2.93.3",
     "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/plugin-dialog": "2",
     "jspdf": "^4.1.0"
   },
   "devDependencies": {

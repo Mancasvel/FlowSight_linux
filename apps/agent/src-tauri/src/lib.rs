@@ -51,7 +51,7 @@ pub fn run() {
             local_agent::get_local_agent_data,
             local_agent::session_plan::propose_session_plan,
             local_agent::session_plan::confirm_session_plan,
-            local_agent::session_plan::discard_session_plan,
+            local_agent::session_plan::cancel_session_plan,
             desktop_presence::get_desktop_preferences,
             desktop_presence::set_focus_alerts_enabled,
             desktop_presence::set_contextual_focus_alerts_enabled,

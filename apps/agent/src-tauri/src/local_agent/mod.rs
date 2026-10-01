@@ -15,13 +15,20 @@ fn parse_arguments(value: &Value) -> Result<Value, String> {
 }
 
 fn send_model_request(client: &Client, url: &str, body: &Value) -> Result<Value, String> {
-    let response = client.post(url).json(body).send()
+    let response = client
+        .post(url)
+        .json(body)
+        .send()
         .map_err(|error| format!("Could not reach local Qwen: {error}"))?;
     if !response.status().is_success() {
         return Err(format!("Local Qwen returned HTTP {}.", response.status()));
     }
-    response.json().map_err(|_| "Local Qwen returned invalid JSON.".into())
+    response
+        .json()
+        .map_err(|_| "Local Qwen returned invalid JSON.".into())
 }
 
 #[tauri::command]
-pub fn get_local_agent_data() -> Result<state::AgentData, String> { state::read() }
+pub fn get_local_agent_data() -> Result<state::AgentData, String> {
+    state::read()
+}
