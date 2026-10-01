@@ -302,8 +302,12 @@ pub async fn capture_context_snapshot(
     
     crate::telemetry::record_selected_task(jira_ticket.as_deref().or(user_task.as_deref()));
     let foreground = crate::context::get_system_context();
-    if let Some(name) = foreground.app_name.as_deref() {
-        crate::focus_alerts::record_app_switch(&app, name);
+    if let Ok(path) = crate::paths::db_path() {
+        if crate::privacy::application_is_excluded(&path, foreground.app_name.as_deref()) {
+            crate::focus_alerts::excluded_app_entered();
+        } else if let Some(name) = foreground.app_name.as_deref() {
+            crate::focus_alerts::record_app_switch(&app, name);
+        }
     }
     // Extract config (default to 16 if not set to ensure balanced load)
     let gpu_layers = {
