@@ -5427,6 +5427,7 @@
           currentUser?.display_name || currentUser?.name || currentUser?.email?.split('@')[0] || '';
       }
       const overlay = document.getElementById('onboardingOverlay');
+      document.body.classList.add('wizard-active');
       overlay?.classList.add('visible');
       overlay?.setAttribute('aria-hidden', 'false');
       document.getElementById('mainApp').inert = true;
@@ -5435,6 +5436,7 @@
     }
 
     function hideOnboardingWizard() {
+      document.body.classList.remove('wizard-active');
       const overlay = document.getElementById('onboardingOverlay');
       overlay?.classList.remove('visible'); overlay?.setAttribute('aria-hidden', 'true');
       document.getElementById('mainApp').inert = false;
