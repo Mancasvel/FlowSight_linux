@@ -1,4 +1,4 @@
-use crate::agent_pure::parse_analysis;
+use crate::agent_pure::{parse_analysis, resolve_persisted_category};
 use crate::focus_semantics::{canonical_ticket_value, LocalDateWindow};
 use crate::vision_model::{
     CONFIG_VISION_MODEL_ID, LLAMA_CHAT_MODEL_ID, VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME,
