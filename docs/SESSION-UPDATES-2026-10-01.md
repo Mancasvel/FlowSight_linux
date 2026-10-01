@@ -38,14 +38,29 @@ production build, native desktop binary linkage and MCP STDIO startup.
 
 Chromium checks the actual renderer with synthetic native responses at 370×700,
 340×400 and 900×800. It verifies label containment, generic/contextual previews,
-independent consent, four-step completion, dark hover brightness, and no implicit
-tracking or calendar writes. The ADDA UI replays a saved local Qwen result for
+independent consent, four-step completion, and no implicit tracking or calendar
+writes. Seven actual button families are measured at all three sizes for subdued
+hover lightness, foreground contrast, visible keyboard focus and disabled-state
+stability. Translucent fills are composited against ancestor backgrounds before
+measurement. The hidden HTML maximize control is a synthetic renderer preview;
+Linux continues to use native window decorations. The ADDA UI replays a saved local Qwen result for
 four exercises and three rests, including PLE-first/15-minute revision and
 unfitted-work messages. The fixture is evidence of that specific local response,
 not a new Linux model run.
 
-This validation does not exercise live Wayland screen capture or real Qwen
-inference on a Linux desktop, and does not build or publish a release installer.
+Separately, native Ubuntu Qwen inference passed in run
+https://github.com/Mancasvel/FlowSight_linux/actions/runs/36833946557 at commit
+`cabc46462deb9843888abca505a6600b5b50df1a`. The harness extracts the actual planner
+request and validation code. Both the initial ADDA request and PLE-first revision
+were accepted: four topics, three breaks of 10 and then 15 minutes, no warm-up
+replacement, and no calendar writes. The first model request took 34.441 seconds.
+The revision's raw model summary retained the former break length, while the host
+corrected the user-facing summary to 15 minutes. The following hover-only update
+changes renderer CSS and this verification script; planner/state/model runtime
+code is byte-for-byte unchanged from that successful model run.
+
+This validation does not exercise live Wayland screen capture or a real user's
+Linux desktop session, and does not build or publish a release installer.
 Compile-only model placeholders cannot be used as a distributable package.
 
 PR: https://github.com/Mancasvel/FlowSight_linux/pull/6

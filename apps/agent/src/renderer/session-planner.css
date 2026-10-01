@@ -71,12 +71,15 @@ html[data-theme="dark"] .session-planner, html[data-theme="dark"] #onboardingOve
 
 @media (prefers-color-scheme: dark) {
  #onboardingOverlay .button-primary:not(:disabled):hover,
- .session-planner .button-primary:not(:disabled):hover { background:#138d85; color:#fff; }
+ .session-planner .button-primary:not(:disabled):hover { background:#12837b; color:#fff; }
  .button-secondary:not(:disabled):hover,
  .session-planner .button-secondary:not(:disabled):hover { background:#2a414b; color:#edf5f4; }
  .button-ghost:not(:disabled):hover { background:#233741; color:#edf5f4; }
  .titlebar-btn:not(:disabled):hover { background:#263b44; color:#edf5f4; }
  #stopTimerBtn:not(:disabled):hover { background:#273e47; color:#edf5f4; }
+ .summary-download-btn:is(:hover, :focus-visible):not(:disabled) { background:#2a414b; color:#b2efe4; }
+ .titlebar-btn:disabled:hover { background:transparent; color:#bed1d7; }
+ #stopTimerBtn:disabled:hover { background:#412d31; color:#ffc4bf; }
 }
 
 #onboardingOverlay .onboarding-body { overflow-y: auto; flex: 1 1 auto; }
