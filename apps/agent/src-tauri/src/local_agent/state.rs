@@ -1,5 +1,5 @@
 //! On-device state for the local action agent. The whole document is protected
-//! with a macOS Keychain-backed encryption key through `secure_config`.
+//! with a Secret Service-backed encryption key through `secure_config`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

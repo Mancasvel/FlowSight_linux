@@ -1032,7 +1032,7 @@ fn configure_llama_command(
         .arg("--port")
         .arg(listen_port.to_string())
         .arg("--ctx-size")
-        .arg("4096")
+        .arg("8192")
         .arg("--parallel")
         .arg("2")
         .arg("--threads")
