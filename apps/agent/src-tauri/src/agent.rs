@@ -43,6 +43,7 @@ pub struct AgentConfig {
 pub struct FlowSightAgent {
     pub config: AgentConfig,
     pub is_running: bool,
+    pub tracking_clock: Option<crate::tracking_clock::TrackingClock>,
     pub reports_sent: u32,
     pub db_path: PathBuf,
 }
@@ -80,11 +81,15 @@ impl FlowSightAgent {
                 daily_goal_hours: Some(6.0),
             },
             is_running: false,
+            tracking_clock: None,
             reports_sent: 0,
             db_path,
         };
 
         agent.init_db();
+        if let Ok(conn) = Connection::open(&agent.db_path) {
+            agent.tracking_clock = load_tracking_clock(&conn).ok();
+        }
         agent.load_config();
         crate::focus_alerts::set_enabled(crate::desktop_presence::focus_alerts_enabled());
 
@@ -549,7 +554,10 @@ fn probe_sqlite_database_rw() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn initialize_agent(state: State<'_, AgentState>) -> Result<bool, String> {
+pub fn initialize_agent(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AgentState>,
+) -> Result<bool, String> {
     let mut g = state.lock().unwrap();
     if g.is_some() {
         return Ok(true);
@@ -573,6 +581,11 @@ pub fn initialize_agent(state: State<'_, AgentState>) -> Result<bool, String> {
     }
 
     *g = Some(FlowSightAgent::new());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(15));
+        use tauri::Manager;
+        let _ = get_tracking_clock(app_handle.state::<AgentState>());
+    });
     crate::language::initialize();
     Ok(true)
 }
@@ -612,6 +625,33 @@ pub fn update_config(state: State<'_, AgentState>, patch: AgentConfig) -> Result
     Ok(true)
 }
 
+fn load_tracking_clock(conn: &Connection) -> Result<crate::tracking_clock::TrackingClock, String> {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let observed = load_daily_totals(conn, &today, &today)?
+        .get(&today)
+        .copied()
+        .unwrap_or(0)
+        .max(0) as u64;
+    crate::tracking_clock::TrackingClock::load(conn, observed)
+}
+
+#[tauri::command]
+pub fn get_tracking_clock(
+    state: State<'_, AgentState>,
+) -> Result<crate::tracking_clock::TrackingClockSnapshot, String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let agent = guard.as_mut().ok_or("Agent not initialized")?;
+    let conn = Connection::open(&agent.db_path).map_err(|e| e.to_string())?;
+    if agent.tracking_clock.is_none() {
+        agent.tracking_clock = Some(load_tracking_clock(&conn)?);
+    }
+    agent
+        .tracking_clock
+        .as_mut()
+        .unwrap()
+        .snapshot(&conn, agent.is_running)
+}
+
 #[tauri::command]
 pub fn get_status(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
     let agent = state.lock().unwrap();
@@ -629,6 +669,11 @@ pub fn get_status(state: State<'_, AgentState>) -> Result<serde_json::Value, Str
 pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
     crate::privacy::require_monitoring_acknowledgement(&crate::paths::db_path()?)?;
     if let Some(a) = state.lock().unwrap().as_mut() {
+        let conn = Connection::open(&a.db_path).map_err(|e| e.to_string())?;
+        if a.tracking_clock.is_none() {
+            a.tracking_clock = Some(load_tracking_clock(&conn)?);
+        }
+        a.tracking_clock.as_mut().unwrap().snapshot(&conn, true)?;
         a.is_running = true;
         crate::focus_alerts::start_monitoring(&a.db_path);
         crate::telemetry::set_enabled(true);
@@ -647,6 +692,10 @@ pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
 #[tauri::command]
 pub fn stop_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
     if let Some(a) = state.lock().unwrap().as_mut() {
+        if let Some(clock) = a.tracking_clock.as_mut() {
+            let conn = Connection::open(&a.db_path).map_err(|e| e.to_string())?;
+            clock.snapshot(&conn, false)?;
+        }
         a.is_running = false;
         crate::focus_alerts::stop_monitoring();
         crate::telemetry::set_enabled(false);
@@ -700,6 +749,7 @@ pub struct TicketBreakdown {
 pub struct TodayHistory {
     pub entries: Vec<DayHistoryEntry>,
     pub total_seconds: i32,
+    pub tracking: Option<crate::tracking_clock::TrackingClockSnapshot>,
     pub category_breakdown: Vec<CategoryBreakdown>,
     pub ticket_breakdown: Vec<TicketBreakdown>,
     pub date: String,
@@ -817,10 +867,15 @@ pub(crate) fn load_daily_totals(
 
 #[tauri::command]
 pub fn get_today_history(state: State<'_, AgentState>) -> Result<TodayHistory, String> {
-    let agent = state.lock().unwrap();
-    let agent = agent.as_ref().ok_or("Agent not initialized")?;
+    let mut agent = state.lock().unwrap();
+    let agent = agent.as_mut().ok_or("Agent not initialized")?;
 
     let conn = Connection::open(&agent.db_path).map_err(|e| e.to_string())?;
+    let tracking = agent
+        .tracking_clock
+        .as_mut()
+        .map(|clock| clock.snapshot(&conn, agent.is_running))
+        .transpose()?;
     // Calendar 'today' in local TZ must use UTC→local conversion: `created_at`
     // defaults to CURRENT_TIMESTAMP (UTC). Comparing plain `date(created_at)`
     // to `date('now','localtime')` used mismatched halves and often returned zero rows.
@@ -884,6 +939,7 @@ pub fn get_today_history(state: State<'_, AgentState>) -> Result<TodayHistory, S
     Ok(TodayHistory {
         entries,
         total_seconds,
+        tracking,
         category_breakdown,
         ticket_breakdown,
         date: today,
