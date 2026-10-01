@@ -32,6 +32,7 @@ mod sync;
 mod sync_env;
 mod sync_pure;
 mod telemetry;
+mod tracking_clock;
 mod user_preferences;
 mod vision_model;
 
@@ -39,7 +40,7 @@ use tauri::Manager;
 
 use agent::{
     capture_screen_command, check_local_server, check_ollama, get_activity_log, get_config,
-    get_status, get_today_history, get_week_summary, initialize_agent,
+    get_status, get_today_history, get_tracking_clock, get_week_summary, initialize_agent,
     llama_managed_process_status, llama_server_log_tail, restart_llama_server_cpu_only,
     save_activity, start_monitoring, stop_monitoring, update_config, AgentState,
 };
@@ -117,6 +118,7 @@ pub fn run() {
             get_config,
             update_config,
             get_status,
+            get_tracking_clock,
             start_monitoring,
             stop_monitoring,
     capture_screen_command,
