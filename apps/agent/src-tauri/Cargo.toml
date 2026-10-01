@@ -25,7 +25,7 @@ tempfile = "3"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "=2.10.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
@@ -34,13 +34,15 @@ aes-gcm = "0.10"
 keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust"] }
 base64 = "0.22"
 chrono = "0.4"
+chrono-tz = "0.10"
+sha2 = "0.10"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 image = "0.25"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 whoami = "1.5"
 active-win-pos-rs = "0.8"
-oauth2 = "4.4"
+oauth2 = { version = "5.0", default-features = false, features = ["reqwest-blocking", "rustls-tls"] }
 url = "2.5"
 tiny_http = "0.12"
 open = "5.0"
@@ -62,3 +64,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_Security_Cryptography",
 ] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"

@@ -68,21 +68,3 @@ html[data-theme="dark"] .session-planner, html[data-theme="dark"] #onboardingOve
 .session-planner :is(button, input, select, textarea, summary):focus-visible,
 #onboardingOverlay :is(button, input, select, textarea, summary):focus-visible { outline: 3px solid var(--session-focus); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .onboarding-demo .demo-block { animation: none; } }
-
-@media (prefers-color-scheme: dark) {
- #onboardingOverlay .button-primary:not(:disabled):hover,
- .session-planner .button-primary:not(:disabled):hover { background:#12837b; color:#fff; }
- .button-secondary:not(:disabled):hover,
- .session-planner .button-secondary:not(:disabled):hover { background:#2a414b; color:#edf5f4; }
- .button-ghost:not(:disabled):hover { background:#233741; color:#edf5f4; }
- .titlebar-btn:not(:disabled):hover { background:#263b44; color:#edf5f4; }
- #stopTimerBtn:not(:disabled):hover { background:#273e47; color:#edf5f4; }
- .summary-download-btn:is(:hover, :focus-visible):not(:disabled) { background:#2a414b; color:#b2efe4; }
- .titlebar-btn:disabled:hover { background:transparent; color:#bed1d7; }
- #stopTimerBtn:disabled:hover { background:#412d31; color:#ffc4bf; }
-}
-
-#onboardingOverlay .onboarding-body { overflow-y: auto; flex: 1 1 auto; }
-#onboardingOverlay .onboarding-footer { width:100%; max-width:620px; }
-.consent-toggle-row { display:flex; align-items:flex-start; gap:12px; margin:14px 0; font-size:12px; line-height:1.5; }
-.consent-toggle-row input { flex:none; margin-top:3px; }

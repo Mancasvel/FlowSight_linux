@@ -1,7 +1,7 @@
 //! Platform-specific screen capture. Linux avoids the `screenshots` crate (libwayshot / ZwlrScreencopy)
 //! and uses system tools instead.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::DynamicImage;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,11 +32,7 @@ pub fn capture_screen() -> Result<(String, PathBuf), String> {
     {
         capture_linux()
     }
-    #[cfg(not(any(
-        windows,
-        target_os = "macos",
-        target_os = "linux"
-    )))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         Err("Screen capture is not implemented for this operating system.".to_string())
     }
@@ -61,11 +57,8 @@ fn debug_capture_dir() -> PathBuf {
 fn process_rgba_dynamic(img: DynamicImage) -> Result<(String, PathBuf), String> {
     let img = img.resize(960, 540, image::imageops::FilterType::Lanczos3);
     let mut png = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut png),
-        image::ImageFormat::Png,
-    )
-    .map_err(|e| e.to_string())?;
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
 
     let debug_dir = debug_capture_dir();
     let _ = std::fs::create_dir_all(&debug_dir);
@@ -333,9 +326,7 @@ pub fn linux_collect_portal_app_ids() -> Vec<String> {
             if !pid_part[1..].chars().all(|c| c.is_ascii_digit()) {
                 continue;
             }
-            let decoded = app_part
-                .replace("\\x2d", "-")
-                .replace("\\x2e", ".");
+            let decoded = app_part.replace("\\x2d", "-").replace("\\x2e", ".");
             if !decoded.is_empty() {
                 ids.insert(decoded);
             }
@@ -457,10 +448,7 @@ fn paths_from_gdbus_screenshot_reply(s: &str) -> Vec<PathBuf> {
                 continue;
             }
             let lower = t.to_ascii_lowercase();
-            if lower.ends_with(".png")
-                || lower.ends_with(".jpg")
-                || lower.ends_with(".jpeg")
-            {
+            if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
                 out.push(PathBuf::from(t));
             }
         }
@@ -546,9 +534,7 @@ pub fn linux_must_avoid_screenshot_portal() -> bool {
 #[cfg(target_os = "linux")]
 pub async fn try_linux_portal_capture() -> Option<Vec<u8>> {
     if linux_is_gnome_session() {
-        log::warn!(
-            "[FlowSight] Screenshot portal skipped on GNOME (use ScreenCast — no flash)"
-        );
+        log::warn!("[FlowSight] Screenshot portal skipped on GNOME (use ScreenCast — no flash)");
         return None;
     }
     use ashpd::desktop::screenshot::Screenshot;
@@ -691,33 +677,25 @@ fn capture_linux() -> Result<(String, PathBuf), String> {
 
     if !wayland {
         pipeline.push(("scrot", linux_raw_scrot));
-        pipeline.push((
-            "maim",
-            || linux_capture_to_tmp("maim", &[] as &[&str]),
-        ));
-        pipeline.push((
-            "import",
-            || linux_capture_to_tmp("import", &["-window", "root"]),
-        ));
-        pipeline.push((
-            "magick",
-            || linux_capture_to_tmp("magick", &["import", "-window", "root"]),
-        ));
+        pipeline.push(("maim", || linux_capture_to_tmp("maim", &[] as &[&str])));
+        pipeline.push(("import", || {
+            linux_capture_to_tmp("import", &["-window", "root"])
+        }));
+        pipeline.push(("magick", || {
+            linux_capture_to_tmp("magick", &["import", "-window", "root"])
+        }));
     }
 
     if !(gnome && wayland) {
-        pipeline.push((
-            "spectacle",
-            || linux_capture_to_tmp("spectacle", &["-b", "-o"]),
-        ));
-        pipeline.push((
-            "xfce4-screenshooter",
-            || linux_capture_to_tmp("xfce4-screenshooter", &["-f"]),
-        ));
-        pipeline.push((
-            "flameshot",
-            || linux_capture_to_tmp("flameshot", &["screen", "-p"]),
-        ));
+        pipeline.push(("spectacle", || {
+            linux_capture_to_tmp("spectacle", &["-b", "-o"])
+        }));
+        pipeline.push(("xfce4-screenshooter", || {
+            linux_capture_to_tmp("xfce4-screenshooter", &["-f"])
+        }));
+        pipeline.push(("flameshot", || {
+            linux_capture_to_tmp("flameshot", &["screen", "-p"])
+        }));
     }
 
     let mut black_rejects = 0u32;
@@ -750,9 +728,7 @@ fn capture_linux() -> Result<(String, PathBuf), String> {
     };
 
     let extra = if black_rejects > 0 {
-        format!(
-            " {black_rejects} method(s) returned black frames (common: scrot on Wayland).",
-        )
+        format!(" {black_rejects} method(s) returned black frames (common: scrot on Wayland).",)
     } else {
         String::new()
     };

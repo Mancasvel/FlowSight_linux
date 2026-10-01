@@ -16,6 +16,9 @@ concurrency:
 jobs:
   native-linux:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      TAURI_GOOGLE_CALENDAR_CLIENT_ID: ${{ vars.TAURI_GOOGLE_CALENDAR_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,7 +81,10 @@ jobs:
           done
           curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null
           node scripts/verify-adda-renderer.mjs
-          node scripts/verify-linux-session-ui.mjs
+          node scripts/verify-session-onboarding.mjs
+          node scripts/verify-localization.mjs
+          node scripts/verify-coach-conversation.mjs
+          node scripts/verify-linked-session.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -101,15 +101,13 @@ fn harden_process_early() {
                 let nout = open_nul(nul_wide.as_ptr(), false);
                 let nerr = open_nul(nul_wide.as_ptr(), false);
                 let invalid = !0usize as *mut c_void;
-                let set_or_null =
-                    |h: *mut c_void, std_h: u32| {
-                        if h.is_null() || h == invalid {
-                            let _ =
-                                SetStdHandle(std_h, std::ptr::null_mut::<c_void>());
-                        } else {
-                            let _ = SetStdHandle(std_h, h);
-                        }
-                    };
+                let set_or_null = |h: *mut c_void, std_h: u32| {
+                    if h.is_null() || h == invalid {
+                        let _ = SetStdHandle(std_h, std::ptr::null_mut::<c_void>());
+                    } else {
+                        let _ = SetStdHandle(std_h, h);
+                    }
+                };
 
                 set_or_null(nin, STD_INPUT_HANDLE);
                 set_or_null(nout, STD_OUTPUT_HANDLE);
@@ -121,124 +119,131 @@ fn harden_process_early() {
 }
 
 fn main() {
-  // The installed app is also a self-contained MCP STDIO server. Handle this
-  // before Windows GUI startup detaches its console/stdin/stdout.
-  if std::env::args().skip(1).any(|arg| arg == "--mcp") {
-    std::process::exit(app_lib::mcp::run_stdio());
-  }
-
-  // Must be first: blocks AppInit_DLLs before user32.dll is loaded.
-  // See the module-level comment above for the full rationale.
-  #[cfg(windows)]
-  harden_process_early();
-
-  // No leemos `.env.local` ni rutas relativas del repo en runtime: no existen
-  // en otros PCs y no deben ser parte del comportamiento instalado.
-  // El `.exe` instalado solo acepta un `.env` junto al ejecutable como override
-  // opcional. La configuracion publica de Supabase tiene defaults en codigo.
-  if let Ok(exe) = std::env::current_exe() {
-    if let Some(dir) = exe.parent() {
-      let _ = dotenv::from_filename(dir.join(".env"));
+    // The installed app is also a self-contained MCP STDIO server. Handle this
+    // before Windows GUI startup detaches its console/stdin/stdout.
+    if std::env::args().skip(1).any(|arg| arg == "--mcp") {
+        std::process::exit(app_lib::mcp::run_stdio());
     }
-  }
 
-  // Panic hook: en release el .exe no tiene stdout, así que cualquier panic
-  // (incluido el que esté cerrando la ventana al loguear con Google) se
-  // perdía. Lo volcamos a %LOCALAPPDATA%\FlowSight\crash.log y al logger de
-  // tauri-plugin-log cuando ya está instalado.
-  std::panic::set_hook(Box::new(|info| {
-    let msg = format!(
-      "[{}] PANIC: {}\nLocation: {}\n\n",
-      chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-      info.payload()
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
-        .unwrap_or("<non-string panic>"),
-      info.location()
-        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-        .unwrap_or_else(|| "<unknown>".into()),
-    );
-    eprintln!("{}", msg);
-    log::error!("{}", msg);
-    let path = app_lib::paths::crash_log_path_or_fallback();
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-      let _ = f.write_all(msg.as_bytes());
+    // Must be first: blocks AppInit_DLLs before user32.dll is loaded.
+    // See the module-level comment above for the full rationale.
+    #[cfg(windows)]
+    harden_process_early();
+
+    // No leemos `.env.local` ni rutas relativas del repo en runtime: no existen
+    // en otros PCs y no deben ser parte del comportamiento instalado.
+    // El `.exe` instalado solo acepta un `.env` junto al ejecutable como override
+    // opcional. La configuracion publica de Supabase tiene defaults en codigo.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = dotenv::from_filename(dir.join(".env"));
+        }
     }
-  }));
 
-  #[cfg(windows)]
-  {
-    // WebView2 overlay scrollbars ignore ::-webkit-scrollbar CSS; force classic bars.
-    std::env::set_var(
-      "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-      "--disable-features=msWebView2OverlayScrollbar,OverlayScrollbar",
-    );
-  }
+    // Panic hook: en release el .exe no tiene stdout, así que cualquier panic
+    // (incluido el que esté cerrando la ventana al loguear con Google) se
+    // perdía. Lo volcamos a %LOCALAPPDATA%\FlowSight\crash.log y al logger de
+    // tauri-plugin-log cuando ya está instalado.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!(
+            "[{}] PANIC: {}\nLocation: {}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            info.payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("<non-string panic>"),
+            info.location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".into()),
+        );
+        eprintln!("{}", msg);
+        log::error!("{}", msg);
+        let path = app_lib::paths::crash_log_path_or_fallback();
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(msg.as_bytes());
+        }
+    }));
 
-  #[cfg(target_os = "linux")]
-  linux_maybe_reexec_under_portal_scope();
+    #[cfg(windows)]
+    {
+        // WebView2 overlay scrollbars ignore ::-webkit-scrollbar CSS; force classic bars.
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-features=msWebView2OverlayScrollbar,OverlayScrollbar",
+        );
+    }
 
-  app_lib::run();
+    #[cfg(target_os = "linux")]
+    linux_maybe_reexec_under_portal_scope();
+
+    app_lib::run();
 }
 
 /// GNOME resolves native apps via `app-gnome-<APP_ID>-<pid>.scope`. Re-exec once so the portal
 /// sees `ai.flowsight.agent` (matches PermissionStore + Settings) instead of a generic `app` id.
 #[cfg(target_os = "linux")]
 fn linux_maybe_reexec_under_portal_scope() {
-  use std::process::Command;
+    use std::process::Command;
 
-  if std::env::var_os("FLOWSIGHT_IN_PORTAL_SCOPE").is_some() {
-    return;
-  }
-  if std::env::var("WAYLAND_DISPLAY").is_err() {
-    return;
-  }
-  let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
-  if !desktop.contains("gnome") {
-    return;
-  }
-
-  let want = app_lib::screen_capture::LINUX_PORTAL_APP_ID;
-  if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
-    if cgroup.contains(&format!("app-gnome-{want}")) || cgroup.contains(&format!("app-{want}")) {
-      std::env::set_var("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
-      return;
+    if std::env::var_os("FLOWSIGHT_IN_PORTAL_SCOPE").is_some() {
+        return;
     }
-  }
+    if std::env::var("WAYLAND_DISPLAY").is_err() {
+        return;
+    }
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    if !desktop.contains("gnome") {
+        return;
+    }
 
-  let Ok(exe) = std::env::current_exe() else {
-    return;
-  };
-  if !Command::new("which")
-    .arg("systemd-run")
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false)
-  {
-    return;
-  }
+    let want = app_lib::screen_capture::LINUX_PORTAL_APP_ID;
+    if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
+        if cgroup.contains(&format!("app-gnome-{want}")) || cgroup.contains(&format!("app-{want}"))
+        {
+            std::env::set_var("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
+            return;
+        }
+    }
 
-  let unit = format!("app-gnome-{want}-{}.scope", std::process::id());
-  let mut cmd = Command::new("systemd-run");
-  cmd.args([
-    "--user",
-    "--scope",
-    &format!("--unit={unit}"),
-    "--collect",
-    "--",
-  ]);
-  cmd.arg(&exe);
-  for arg in std::env::args().skip(1) {
-    cmd.arg(arg);
-  }
-  cmd.env("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if !Command::new("which")
+        .arg("systemd-run")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return;
+    }
 
-  match cmd.status() {
-    Ok(st) => std::process::exit(st.code().unwrap_or(1)),
-    Err(e) => eprintln!("[FlowSight] systemd-run portal scope failed: {e}"),
-  }
+    let unit = format!("app-gnome-{want}-{}.scope", std::process::id());
+    let mut cmd = Command::new("systemd-run");
+    cmd.args([
+        "--user",
+        "--scope",
+        &format!("--unit={unit}"),
+        "--collect",
+        "--",
+    ]);
+    cmd.arg(&exe);
+    for arg in std::env::args().skip(1) {
+        cmd.arg(arg);
+    }
+    cmd.env("FLOWSIGHT_IN_PORTAL_SCOPE", "1");
+
+    match cmd.status() {
+        Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+        Err(e) => eprintln!("[FlowSight] systemd-run portal scope failed: {e}"),
+    }
 }

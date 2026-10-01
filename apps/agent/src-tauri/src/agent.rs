@@ -1,16 +1,17 @@
 use crate::agent_pure::parse_analysis;
+use crate::focus_semantics::{canonical_ticket_value, LocalDateWindow};
 use crate::vision_model::{
     CONFIG_VISION_MODEL_ID, LLAMA_CHAT_MODEL_ID, VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME,
     VISION_STATUS_LABEL,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use std::path::{Path, PathBuf};
-use tauri::State;
 use chrono::{Datelike, Local};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri::State;
 
 pub type AgentState = Mutex<Option<FlowSightAgent>>;
 
@@ -47,13 +48,18 @@ pub struct FlowSightAgent {
 }
 
 impl Default for FlowSightAgent {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlowSightAgent {
     pub fn new() -> Self {
         let db_path = crate::paths::db_path().unwrap_or_else(|e| {
-            log::error!("[Agent] paths::db_path unavailable ({}); using cwd fallback.", e);
+            log::error!(
+                "[Agent] paths::db_path unavailable ({}); using cwd fallback.",
+                e
+            );
             dirs::data_local_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("FlowSight")
@@ -63,7 +69,7 @@ impl FlowSightAgent {
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        
+
         let mut agent = Self {
             config: AgentConfig {
                 dev_name: Some(whoami::realname()),
@@ -77,19 +83,24 @@ impl FlowSightAgent {
             reports_sent: 0,
             db_path,
         };
-        
+
         agent.init_db();
         agent.load_config();
         crate::focus_alerts::set_enabled(crate::desktop_presence::focus_alerts_enabled());
-        
+
+        if let Err(error) = crate::privacy::enforce_local_retention(&agent.db_path) {
+            log::warn!("[Privacy] Local retention enforcement failed: {error}");
+        }
+        crate::privacy::start_local_retention_thread(agent.db_path.clone());
+        crate::anonymous_analytics::start_analytics_sync_thread(agent.db_path.clone());
         // Start Background Sync (10m interval)
         crate::sync::start_sync_thread(agent.db_path.clone());
         // Proactive Supabase JWT refresh (~every 2m when near expiry)
         crate::sync::start_token_refresh_thread(agent.db_path.clone());
-        
+
         agent
     }
-    
+
     fn init_db(&self) {
         match Connection::open(&self.db_path) {
             Ok(conn) => {
@@ -113,6 +124,10 @@ impl FlowSightAgent {
                 let _ = conn.execute("ALTER TABLE reports ADD COLUMN active_app TEXT", []);
                 let _ = conn.execute("ALTER TABLE reports ADD COLUMN window_title TEXT", []);
                 let _ = conn.execute("ALTER TABLE reports ADD COLUMN theme_hint TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN capture_source TEXT", []);
+                if let Err(error) = crate::privacy::ensure_schema(&conn) {
+                    log::error!("[Privacy] Schema initialization failed: {error}");
+                }
 
                 let _ = conn.execute(
                     "ALTER TABLE reports ADD COLUMN duration_seconds INTEGER DEFAULT 30",
@@ -203,7 +218,13 @@ impl FlowSightAgent {
         }
     }
 
-    fn save_report(&self, desc: &str, activity_type: &str, ticket: Option<String>, duration: u64) -> Option<i64> {
+    fn save_report(
+        &self,
+        desc: &str,
+        activity_type: &str,
+        ticket: Option<String>,
+        duration: u64,
+    ) -> Option<i64> {
         let Ok(conn) = Connection::open(&self.db_path) else {
             log::warn!("[Agent] save_report: cannot open {:?}", self.db_path);
             return None;
@@ -226,7 +247,7 @@ impl FlowSightAgent {
             let _ = conn.execute("UPDATE reports SET synced = 1 WHERE id = ?", [id]);
         }
     }
-    
+
     fn get_recent(&self, limit: u32) -> Vec<ActivityReport> {
         let mut reports = Vec::new();
         if let Ok(conn) = Connection::open(&self.db_path) {
@@ -270,7 +291,7 @@ pub fn capture_screen_command() -> Result<CaptureResult, String> {
     let (base64, path) = capture_screen()?;
     Ok(CaptureResult {
         path: path.to_string_lossy().to_string(),
-        base64
+        base64,
     })
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -296,15 +317,15 @@ pub struct SnapshotMetadata {
 pub async fn capture_context_snapshot(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
-    user_task: Option<String>, 
-    jira_ticket: Option<String>
+    user_task: Option<String>,
+    jira_ticket: Option<String>,
 ) -> Result<ContextSnapshot, String> {
-    
     crate::telemetry::record_selected_task(jira_ticket.as_deref().or(user_task.as_deref()));
     let foreground = crate::context::get_system_context();
     if let Ok(path) = crate::paths::db_path() {
         if crate::privacy::application_is_excluded(&path, foreground.app_name.as_deref()) {
             crate::focus_alerts::excluded_app_entered();
+            return Err("Capture skipped for an excluded application.".into());
         } else if let Some(name) = foreground.app_name.as_deref() {
             crate::focus_alerts::record_app_switch(&app, name);
         }
@@ -312,9 +333,10 @@ pub async fn capture_context_snapshot(
     // Extract config (default to 16 if not set to ensure balanced load)
     let gpu_layers = {
         let guard = state.lock().unwrap();
-        guard.as_ref()
+        guard
+            .as_ref()
             .and_then(|a| a.config.gpu_layers)
-            .or(Some(16)) 
+            .or(Some(16))
     };
 
     #[cfg(target_os = "linux")]
@@ -378,31 +400,41 @@ pub async fn capture_context_snapshot(
         let path = PathBuf::from(&path_str);
 
         // 2. Local vision analysis (visual description + category)
-        let task_context = jira_ticket.clone().or(user_task.clone()).unwrap_or_else(|| "General".to_string());
-        
+        let task_context = jira_ticket
+            .clone()
+            .or(user_task.clone())
+            .unwrap_or_else(|| "General".to_string());
+
         let raw_analysis = match analyze_image_with_vision(&base64, &task_context, gpu_layers) {
             Ok(res) => (res, false),
             Err(e) => {
                 let err_msg = format!("[Agent] AI Analysis Failed: {}", e);
                 println!("{}", err_msg);
-                
+
                 // Log a archivo en el app data dir (antes era "agent_error.log"
                 // con path relativo: en release cwd puede ser Program Files y
                 // el write fallaba silencioso por UAC).
                 if let Ok(log_path) = crate::paths::agent_error_log_path() {
-                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
                         let _ = writeln!(file, "{}", err_msg);
                     }
                 }
-                
-                ("Screen analysis failed. Category: General".to_string(), true)
+
+                (
+                    "Screen analysis failed. Category: General".to_string(),
+                    true,
+                )
             }
         };
-        
+
         // Parse category from response
         let (description, category) = parse_analysis(&raw_analysis.0);
-        let analysis_failed = raw_analysis.1
-            || description.eq_ignore_ascii_case("No analysis available");
+        let analysis_failed =
+            raw_analysis.1 || description.eq_ignore_ascii_case("No analysis available");
 
         if analysis_failed {
             log::warn!("[FlowSight] Vision analysis failed or empty for this capture");
@@ -416,7 +448,7 @@ pub async fn capture_context_snapshot(
 
         // 3. System Context (Window/App)
         let sys = get_system_context();
-        
+
         // 4. Git Context (Project)
         // Antes: hardcodeaba ~/Desktop/FlowSight.AI (solo exist\u00eda en la m\u00e1quina
         // del dev) y ca\u00eda a CWD=="." en release, que en una instalaci\u00f3n a
@@ -440,13 +472,23 @@ pub async fn capture_context_snapshot(
                 app: sys.app_name,
                 branch: git.and_then(|g| g.branch),
                 language: None,
-            }
+            },
         })
-    }).await.map_err(|e| format!("Task join error: {}", e))?
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]
-pub fn save_activity(app: tauri::AppHandle, state: State<'_, AgentState>, description: String, activity_type: String, jira_ticket: Option<String>, duration_seconds: Option<u64>, active_app: Option<String>) -> Result<ActivityReport, String> {
+pub fn save_activity(
+    app: tauri::AppHandle,
+    state: State<'_, AgentState>,
+    description: String,
+    activity_type: String,
+    jira_ticket: Option<String>,
+    duration_seconds: Option<u64>,
+    active_app: Option<String>,
+) -> Result<ActivityReport, String> {
     let mut agent = state.lock().unwrap();
     let Some(a) = agent.as_mut() else {
         return Err(
@@ -454,16 +496,27 @@ pub fn save_activity(app: tauri::AppHandle, state: State<'_, AgentState>, descri
         );
     };
     let duration = duration_seconds.unwrap_or(30).clamp(1, 300);
-    let active_app = active_app.filter(|name| !crate::privacy::application_is_excluded(&a.db_path, Some(name)));
+    let active_app =
+        active_app.filter(|name| !crate::privacy::application_is_excluded(&a.db_path, Some(name)));
     a.reports_sent += 1;
     let report_id = a
         .save_report(&description, &activity_type, jira_ticket, duration)
         .ok_or_else(|| "Failed to write activity to local database.".to_string())?;
 
     if let Ok(conn) = Connection::open(&a.db_path) {
-        let _ = conn.execute("UPDATE reports SET active_app=?1 WHERE id=?2", params![active_app, report_id]);
+        let _ = conn.execute(
+            "UPDATE reports SET active_app=?1 WHERE id=?2",
+            params![active_app, report_id],
+        );
     }
-    crate::focus_alerts::review_browsing_report(&app, &a.db_path, &activity_type, duration, &description, active_app.as_deref());
+    crate::focus_alerts::review_browsing_report(
+        &app,
+        &a.db_path,
+        &activity_type,
+        duration,
+        &description,
+        active_app.as_deref(),
+    );
     Ok(ActivityReport {
         id: Some(report_id),
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -478,8 +531,8 @@ pub fn save_activity(app: tauri::AppHandle, state: State<'_, AgentState>, descri
 /// Comprueba que SQLite puede **escribir** en `dev-agent.db` (CFA / solo lectura / disco lleno).
 fn probe_sqlite_database_rw() -> Result<(), String> {
     let db_path = crate::paths::db_path()?;
-    let conn = Connection::open(&db_path)
-        .map_err(|e| format!("SQLite cannot open {:?}: {e}", db_path))?;
+    let conn =
+        Connection::open(&db_path).map_err(|e| format!("SQLite cannot open {:?}: {e}", db_path))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          CREATE TEMP TABLE IF NOT EXISTS _flowsight_io_probe (x INTEGER);
@@ -520,12 +573,18 @@ pub fn initialize_agent(state: State<'_, AgentState>) -> Result<bool, String> {
     }
 
     *g = Some(FlowSightAgent::new());
+    crate::language::initialize();
     Ok(true)
 }
 
 #[tauri::command]
 pub fn get_config(state: State<'_, AgentState>) -> Result<AgentConfig, String> {
-    Ok(state.lock().unwrap().as_ref().map(|a| a.config.clone()).unwrap_or_default())
+    Ok(state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|a| a.config.clone())
+        .unwrap_or_default())
 }
 
 #[tauri::command]
@@ -546,9 +605,7 @@ pub fn update_config(state: State<'_, AgentState>, patch: AgentConfig) -> Result
             c.gpu_layers = patch.gpu_layers;
         }
         if patch.daily_goal_hours.is_some() {
-            c.daily_goal_hours = patch
-                .daily_goal_hours
-                .map(|h| h.clamp(0.0, 24.0));
+            c.daily_goal_hours = patch.daily_goal_hours.map(|h| h.clamp(0.0, 24.0));
         }
         agent.save_config();
     }
@@ -570,6 +627,7 @@ pub fn get_status(state: State<'_, AgentState>) -> Result<serde_json::Value, Str
 
 #[tauri::command]
 pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
+    crate::privacy::require_monitoring_acknowledgement(&crate::paths::db_path()?)?;
     if let Some(a) = state.lock().unwrap().as_mut() {
         a.is_running = true;
         crate::focus_alerts::start_monitoring(&a.db_path);
@@ -599,8 +657,16 @@ pub fn stop_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn get_activity_log(state: State<'_, AgentState>, limit: Option<u32>) -> Result<Vec<ActivityReport>, String> {
-    Ok(state.lock().unwrap().as_ref().map(|a| a.get_recent(limit.unwrap_or(20))).unwrap_or_default())
+pub fn get_activity_log(
+    state: State<'_, AgentState>,
+    limit: Option<u32>,
+) -> Result<Vec<ActivityReport>, String> {
+    Ok(state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|a| a.get_recent(limit.unwrap_or(20)))
+        .unwrap_or_default())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -610,6 +676,10 @@ pub struct DayHistoryEntry {
     pub category: String,
     pub ticket: Option<String>,
     pub duration_seconds: i32,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    pub capture_source: Option<String>,
+    pub theme_hint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -626,63 +696,167 @@ pub struct TicketBreakdown {
     pub count: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct TodayHistory {
     pub entries: Vec<DayHistoryEntry>,
     pub total_seconds: i32,
     pub category_breakdown: Vec<CategoryBreakdown>,
     pub ticket_breakdown: Vec<TicketBreakdown>,
     pub date: String,
+    pub focus: crate::focus_semantics::FocusSummary,
+}
+
+fn load_day_history_entries(conn: &Connection, day: &str) -> Result<Vec<DayHistoryEntry>, String> {
+    let window = LocalDateWindow::parse(day, day)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT datetime(created_at, 'localtime'), description, activity_type, jira_ticket_id, duration_seconds,
+                    active_app, window_title, capture_source, theme_hint
+             FROM reports
+             WHERE date(created_at, 'localtime') >= ?1
+               AND date(created_at, 'localtime') <= date(?1, '+1 day')
+             ORDER BY datetime(created_at, 'localtime') ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![day], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, String>(1).unwrap_or_default(),
+                row.get::<_, String>(2).unwrap_or_default(),
+                row.get::<_, Option<String>>(3).unwrap_or(None),
+                row.get::<_, i64>(4).unwrap_or(0).max(0),
+                row.get::<_, Option<String>>(5).unwrap_or(None),
+                row.get::<_, Option<String>>(6).unwrap_or(None),
+                row.get::<_, Option<String>>(7).unwrap_or(None),
+                row.get::<_, Option<String>>(8).unwrap_or(None),
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+
+    let mut entries = Vec::new();
+    for (time, description, raw_category, ticket, duration, app, title, source, theme) in rows {
+        let category = resolve_persisted_category(&raw_category);
+        let ticket = canonical_ticket_value(ticket.as_deref());
+        let slices = window.slices_for_observation(&time, duration);
+        if slices.is_empty() {
+            // Zero-duration action reviews remain useful narrative evidence,
+            // but never add tracked time or enter the focus detector.
+            if duration == 0 && window.contains_local_timestamp(&time) {
+                entries.push(DayHistoryEntry {
+                    time,
+                    description,
+                    category,
+                    ticket,
+                    duration_seconds: 0,
+                    app_name: app,
+                    window_title: title,
+                    capture_source: source,
+                    theme_hint: theme,
+                });
+            }
+            continue;
+        }
+        for slice in slices {
+            let slice_end = slice.start + chrono::Duration::seconds(slice.duration_seconds);
+            entries.push(DayHistoryEntry {
+                time: slice_end.format("%Y-%m-%d %H:%M:%S").to_string(),
+                description: description.clone(),
+                category: category.clone(),
+                ticket: ticket.clone(),
+                duration_seconds: i32::try_from(slice.duration_seconds).unwrap_or(i32::MAX),
+                app_name: app.clone(),
+                window_title: title.clone(),
+                capture_source: source.clone(),
+                theme_hint: theme.clone(),
+            });
+        }
+    }
+    entries.sort_by(|left, right| right.time.cmp(&left.time));
+    Ok(entries)
+}
+
+pub(crate) fn load_daily_totals(
+    conn: &Connection,
+    period_start: &str,
+    period_end: &str,
+) -> Result<std::collections::HashMap<String, i32>, String> {
+    let window = LocalDateWindow::parse(period_start, period_end)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT datetime(created_at, 'localtime'), duration_seconds
+             FROM reports
+             WHERE date(created_at, 'localtime') >= ?1
+               AND date(created_at, 'localtime') <= date(?2, '+1 day')
+             ORDER BY datetime(created_at, 'localtime') ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![period_start, period_end], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, i64>(1).unwrap_or(0).max(0),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut totals = std::collections::HashMap::new();
+    for (observed_end, duration) in rows.filter_map(Result::ok) {
+        for slice in window.slices_for_observation(&observed_end, duration) {
+            let date = slice.start.format("%Y-%m-%d").to_string();
+            let seconds = i32::try_from(slice.duration_seconds).unwrap_or(i32::MAX);
+            totals
+                .entry(date)
+                .and_modify(|total: &mut i32| *total = total.saturating_add(seconds))
+                .or_insert(seconds);
+        }
+    }
+    Ok(totals)
 }
 
 #[tauri::command]
 pub fn get_today_history(state: State<'_, AgentState>) -> Result<TodayHistory, String> {
     let agent = state.lock().unwrap();
     let agent = agent.as_ref().ok_or("Agent not initialized")?;
-    
+
     let conn = Connection::open(&agent.db_path).map_err(|e| e.to_string())?;
     // Calendar 'today' in local TZ must use UTC→local conversion: `created_at`
     // defaults to CURRENT_TIMESTAMP (UTC). Comparing plain `date(created_at)`
     // to `date('now','localtime')` used mismatched halves and often returned zero rows.
     let today = Local::now().format("%Y-%m-%d").to_string();
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT created_at, description, activity_type, jira_ticket_id, duration_seconds
-         FROM reports
-         WHERE date(created_at, 'localtime') = ?1
-         ORDER BY datetime(created_at) DESC",
-        )
-        .map_err(|e| e.to_string())?;
+    let entries = load_day_history_entries(&conn, &today)?;
 
-    let entries: Vec<DayHistoryEntry> = stmt.query_map(params![today], |row| {
-        Ok(DayHistoryEntry {
-            time: row.get::<_, String>(0).unwrap_or_default(),
-            description: row.get::<_, String>(1).unwrap_or_default(),
-            category: row.get::<_, String>(2).unwrap_or_default(),
-            ticket: row.get::<_, Option<String>>(3).unwrap_or(None),
-            duration_seconds: row.get::<_, i32>(4).unwrap_or(30),
-        })
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-    
     // Calculate total
     let total_seconds: i32 = entries.iter().map(|e| e.duration_seconds).sum();
-    
+
     // Category breakdown
-    let mut cat_map: std::collections::HashMap<String, (i32, i32)> = std::collections::HashMap::new();
+    let mut cat_map: std::collections::HashMap<String, (i32, i32)> =
+        std::collections::HashMap::new();
     for e in &entries {
         let entry = cat_map.entry(e.category.clone()).or_insert((0, 0));
         entry.0 += e.duration_seconds;
         entry.1 += 1;
     }
-    let category_breakdown: Vec<CategoryBreakdown> = cat_map.into_iter()
-        .map(|(category, (total_seconds, count))| CategoryBreakdown { category, total_seconds, count })
+    let mut category_breakdown: Vec<CategoryBreakdown> = cat_map
+        .into_iter()
+        .map(|(category, (total_seconds, count))| CategoryBreakdown {
+            category,
+            total_seconds,
+            count,
+        })
         .collect();
-    
+    category_breakdown.sort_by(|left, right| {
+        right
+            .total_seconds
+            .cmp(&left.total_seconds)
+            .then_with(|| left.category.cmp(&right.category))
+    });
+
     // Ticket breakdown
-    let mut ticket_map: std::collections::HashMap<String, (i32, i32)> = std::collections::HashMap::new();
+    let mut ticket_map: std::collections::HashMap<String, (i32, i32)> =
+        std::collections::HashMap::new();
     for e in &entries {
         if let Some(ref ticket) = e.ticket {
             let entry = ticket_map.entry(ticket.clone()).or_insert((0, 0));
@@ -690,16 +864,30 @@ pub fn get_today_history(state: State<'_, AgentState>) -> Result<TodayHistory, S
             entry.1 += 1;
         }
     }
-    let ticket_breakdown: Vec<TicketBreakdown> = ticket_map.into_iter()
-        .map(|(ticket, (total_seconds, count))| TicketBreakdown { ticket, total_seconds, count })
+    let mut ticket_breakdown: Vec<TicketBreakdown> = ticket_map
+        .into_iter()
+        .map(|(ticket, (total_seconds, count))| TicketBreakdown {
+            ticket,
+            total_seconds,
+            count,
+        })
         .collect();
-    
+    ticket_breakdown.sort_by(|left, right| {
+        right
+            .total_seconds
+            .cmp(&left.total_seconds)
+            .then_with(|| left.ticket.cmp(&right.ticket))
+    });
+
+    let focus = crate::focus_semantics::summarize_from_db(&conn, &today, &today)?;
+
     Ok(TodayHistory {
         entries,
         total_seconds,
         category_breakdown,
         ticket_breakdown,
         date: today,
+        focus,
     })
 }
 
@@ -730,32 +918,9 @@ pub fn get_week_summary(state: State<'_, AgentState>) -> Result<WeekSummary, Str
     let week_end = week_start + chrono::Duration::days(6);
     let yesterday = today - chrono::Duration::days(1);
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT date(created_at, 'localtime') as d, SUM(duration_seconds) as total
-         FROM reports
-         WHERE date(created_at, 'localtime') >= ?1 AND date(created_at, 'localtime') <= ?2
-         GROUP BY d",
-        )
-        .map_err(|e| e.to_string())?;
-
     let start_str = week_start.format("%Y-%m-%d").to_string();
     let end_str = week_end.format("%Y-%m-%d").to_string();
-
-    let mut day_totals: std::collections::HashMap<String, i32> =
-        std::collections::HashMap::new();
-    let rows = stmt
-        .query_map(params![start_str, end_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i32>(1).unwrap_or(0),
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-
-    for row in rows.filter_map(|r| r.ok()) {
-        day_totals.insert(row.0, row.1);
-    }
+    let day_totals = load_daily_totals(&conn, &start_str, &end_str)?;
 
     let weekday_labels = ["M", "T", "W", "T", "F", "S", "S"];
     let mut days = Vec::with_capacity(7);
@@ -794,7 +959,9 @@ fn local_server_health_ok() -> bool {
         return false;
     };
     let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(LOCAL_HEALTH_HTTP_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            LOCAL_HEALTH_HTTP_TIMEOUT_SECS,
+        ))
         .build()
     else {
         return false;
@@ -807,10 +974,18 @@ fn local_server_health_ok() -> bool {
         .unwrap_or(false)
 }
 
+// Async so Tauri dispatches it off the main/UI thread: the `reqwest::blocking`
+// call below opens a real TCP socket even for localhost, which is exactly what
+// makes Windows inject any registered Winsock LSP (VPN/AV network proxies —
+// see crash_guard.rs) into this process. Keeping that off the main thread
+// means a crash_guard-contained LSP crash here only takes down this
+// background thread, never the window's message loop.
 #[tauri::command]
 pub fn check_local_server() -> Result<serde_json::Value, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(LOCAL_HEALTH_HTTP_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            LOCAL_HEALTH_HTTP_TIMEOUT_SECS,
+        ))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -925,7 +1100,10 @@ fn wait_for_managed_health_secs(max_secs: u64) -> bool {
 }
 
 /// Starts the managed llama-server if needed and waits until `/health` responds.
-pub fn ensure_local_llm_ready(app: tauri::AppHandle, state: State<'_, AgentState>) -> Result<(), String> {
+pub fn ensure_local_llm_ready(
+    app: tauri::AppHandle,
+    state: State<'_, AgentState>,
+) -> Result<(), String> {
     if local_server_health_ok() {
         return Ok(());
     }
@@ -1008,9 +1186,9 @@ fn configure_llama_command(
     redirect_log_to_file: bool,
     #[cfg_attr(not(windows), allow(unused_variables))] creation_flags: Option<u32>,
 ) -> Result<std::process::Command, String> {
-    use std::process::Command;
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
 
     let n_gpu_layers = clamp_llama_gpu_layers(gpu_layers);
 
@@ -1122,8 +1300,10 @@ fn try_spawn_llama_process(
             (None, false),
         ];
 
-        let mut last_err =
-            IoError::new(std::io::ErrorKind::Other, "llama-server spawn failed (no attempts)");
+        let mut last_err = IoError::new(
+            std::io::ErrorKind::Other,
+            "llama-server spawn failed (no attempts)",
+        );
         let mut spawned: Option<std::process::Child> = None;
         for &(flags, redirect_log) in &attempts {
             let mut cmd = configure_llama_command(
@@ -1179,18 +1359,25 @@ fn spawn_llama_managed_child(
     gpu_layers: i32,
     vulkan_visible_device_index: Option<&str>,
 ) -> Result<std::process::Child, String> {
-    let weights_dir = crate::paths::resource_local_llm_dir(app)?;
+    let (model_path, mmproj_path) = crate::model_assets::ensure_vision_weights(app)?;
+    let weights_dir =
+        crate::paths::resource_local_llm_dir(app).unwrap_or(crate::paths::local_llm_storage_dir()?);
     let bin_path = crate::llama_bin::ensure_llama_server(
         app,
         crate::paths::local_llm_storage_dir()?.join("bin-b10666"),
     )?;
-    let model_path = weights_dir.join(VISION_GGUF_FILENAME);
-    let mmproj_path = weights_dir.join(VISION_MMPROJ_FILENAME);
+
     if !model_path.exists() {
-        return Err(format!("Vision weights not found at {:?}. Reinstall FlowSight Agent.", model_path));
+        return Err(format!(
+            "Vision weights not found at {:?}. Reinstall FlowSight Agent.",
+            model_path
+        ));
     }
     if !mmproj_path.exists() {
-        return Err(format!("Vision projector not found at {:?}. Reinstall FlowSight Agent.", mmproj_path));
+        return Err(format!(
+            "Vision projector not found at {:?}. Reinstall FlowSight Agent.",
+            mmproj_path
+        ));
     }
 
     let log_path = crate::paths::server_log_path()?;
@@ -1245,7 +1432,10 @@ fn spawn_llama_managed_child(
                 if let Err(e) =
                     crate::llama_windows_job::assign_llama_child_to_kill_on_close_job(&child)
                 {
-                    log::warn!("[FlowSight llama-server] Windows job-object attach skipped: {}", e);
+                    log::warn!(
+                        "[FlowSight llama-server] Windows job-object attach skipped: {}",
+                        e
+                    );
                 }
                 return Ok(child);
             }
@@ -1257,7 +1447,8 @@ fn spawn_llama_managed_child(
                 };
                 let msg = format!("Failed to start server: {}{}", e, hint);
                 last_err = Some(msg.clone());
-                if (attempt + 1) < LLAMA_LISTEN_PORT_SPAWN_ATTEMPTS && crate::llama_port::tcp_bind_addr_in_use(&e)
+                if (attempt + 1) < LLAMA_LISTEN_PORT_SPAWN_ATTEMPTS
+                    && crate::llama_port::tcp_bind_addr_in_use(&e)
                 {
                     log::warn!(
                         "[FlowSight llama-server] spawn EADDRINUSE-style error; retrying another port ({}/{}) — {}",
@@ -1275,15 +1466,17 @@ fn spawn_llama_managed_child(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        "Failed to start server: exhausted listen-port retries.".to_string()
-    }))
+    Err(last_err
+        .unwrap_or_else(|| "Failed to start server: exhausted listen-port retries.".to_string()))
 }
 
 /// Arranca llama-server: modo automático sube desde capas GPU altas hasta que `/health`
 /// responda; modo manual fuerza `--n-gpu-layers` fijo.
 #[tauri::command]
-pub fn start_server(app: tauri::AppHandle, state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+pub fn start_server(
+    app: tauri::AppHandle,
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
     let mode = gpu_serve_mode(&state);
     {
         let guard = SERVER_PROCESS.lock().unwrap();
@@ -1433,7 +1626,10 @@ pub fn stop_server() -> Result<bool, String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = Command::new("taskkill").args(["/F", "/IM", "llama-server.exe"]).creation_flags(0x08000000).output();
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "llama-server.exe"])
+            .creation_flags(0x08000000)
+            .output();
     }
 
     Ok(true)
@@ -1441,7 +1637,9 @@ pub fn stop_server() -> Result<bool, String> {
 
 fn truncate_repetition(text: &str) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() < 10 { return text.to_string(); }
+    if words.len() < 10 {
+        return text.to_string();
+    }
 
     let mut result: Vec<&str> = Vec::with_capacity(words.len());
     let mut repeat_count = 0u32;
@@ -1449,7 +1647,9 @@ fn truncate_repetition(text: &str) -> String {
     for (i, word) in words.iter().enumerate() {
         if i > 0 && *word == words[i - 1] {
             repeat_count += 1;
-            if repeat_count >= 4 { continue; }
+            if repeat_count >= 4 {
+                continue;
+            }
         } else {
             repeat_count = 0;
         }
@@ -1457,14 +1657,21 @@ fn truncate_repetition(text: &str) -> String {
     }
 
     if result.len() < words.len() {
-        println!("[Vision] Truncated {} repeated tokens from output", words.len() - result.len());
+        println!(
+            "[Vision] Truncated {} repeated tokens from output",
+            words.len() - result.len()
+        );
     }
     result.join(" ")
 }
 
 // RESTORED AI ANALYSIS (Backend)
 #[tauri::command]
-fn analyze_image_with_vision(base64_img: &str, current_task: &str, _gpu_layers: Option<i32>) -> Result<String, String> {
+fn analyze_image_with_vision(
+    base64_img: &str,
+    current_task: &str,
+    _gpu_layers: Option<i32>,
+) -> Result<String, String> {
     let chat_url = crate::llama_port::managed_chat_completions_url().ok_or_else(|| {
         "Local vision server URL unknown — start the embedded Local AI server first.".to_string()
     })?;
@@ -1527,7 +1734,8 @@ CATEGORY rules: use Coding ONLY for software development (editing code, debuggin
             "stream": false
         });
 
-        let resp = client.post(&chat_url)
+        let resp = client
+            .post(&chat_url)
             .json(&body)
             .send()
             .map_err(|e| format!("Request failed: {}", e))?;
@@ -1537,7 +1745,10 @@ CATEGORY rules: use Coding ONLY for software development (editing code, debuggin
         }
 
         let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-        let content = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim();
+        let content = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim();
 
         // Detect empty or refusal responses
         let is_empty = content.is_empty();
@@ -1555,7 +1766,10 @@ CATEGORY rules: use Coding ONLY for software development (editing code, debuggin
             || c.contains("no puedo analizar");
 
         if is_empty || is_refusal {
-            println!("[Vision] Attempt {}/{}: empty or refusal response, retrying...", attempt, max_attempts);
+            println!(
+                "[Vision] Attempt {}/{}: empty or refusal response, retrying...",
+                attempt, max_attempts
+            );
             if attempt < max_attempts {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
@@ -1637,4 +1851,64 @@ mod repetition_tests {
         let out = truncate_repetition(spam.trim());
         assert!(out.len() < spam.len());
     }
+}
+
+#[tauri::command]
+pub fn set_task_context(
+    user_task: Option<String>,
+    jira_ticket: Option<String>,
+) -> Result<bool, String> {
+    crate::telemetry::set_task_context(user_task, jira_ticket);
+    Ok(true)
+}
+
+/// Called only by the serialized native Linux capture loop. A paused/stopped
+/// cycle cannot append late results after its tracking generation changes.
+pub(crate) fn save_native_snapshot(
+    app: &tauri::AppHandle,
+    snapshot: &ContextSnapshot,
+    generation: u64,
+    duration_seconds: u64,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<AgentState>();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let Some(agent) = guard.as_mut() else {
+        return Ok(());
+    };
+    if duration_seconds == 0
+        || !agent.is_running
+        || !crate::telemetry::capture_is_current(generation)
+        || snapshot.analysis_failed
+    {
+        return Ok(());
+    }
+    let category = crate::agent_pure::resolve_persisted_category(&snapshot.category);
+    let app_name = snapshot.metadata.app.as_deref();
+    if crate::privacy::application_is_excluded(&agent.db_path, app_name) {
+        return Ok(());
+    }
+    let duration = duration_seconds.clamp(1, 300);
+    let ticket = canonical_ticket_value(snapshot.metadata.task.as_deref());
+    let id = agent
+        .save_report(&snapshot.description, &category, ticket, duration)
+        .ok_or("Could not save native activity")?;
+    let conn = Connection::open(&agent.db_path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE reports SET active_app=?1,capture_source='linux-native' WHERE id=?2",
+        params![app_name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    agent.reports_sent += 1;
+    let db_path = agent.db_path.clone();
+    drop(guard);
+    crate::focus_alerts::review_browsing_report(
+        app,
+        &db_path,
+        &category,
+        duration,
+        &snapshot.description,
+        app_name,
+    );
+    Ok(())
 }

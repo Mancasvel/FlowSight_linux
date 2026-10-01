@@ -53,7 +53,10 @@ pub fn db_path_read_only() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir().ok_or_else(|| "No local data dir available".to_string())?;
     let path = base.join(APP_DIR_NAME).join(DB_FILE);
     if !path.is_file() {
-        return Err("FlowSight local database not found. Start monitoring in the desktop app first.".to_string());
+        return Err(
+            "FlowSight local database not found. Start monitoring in the desktop app first."
+                .to_string(),
+        );
     }
     Ok(path)
 }
@@ -324,3 +327,39 @@ pub fn save_pdf_to_directory(
     Err("This folder already contains too many reports with the same name.".into())
 }
 
+/// Writes an already-sanitized privacy export to the user's Downloads folder.
+pub fn save_bytes_to_downloads(filename: &str, bytes: &[u8]) -> Result<String, String> {
+    let downloads = dirs::download_dir()
+        .ok_or_else(|| "Downloads folder not available on this system".to_string())?;
+    let safe: String = filename
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .collect();
+    if safe.is_empty() || safe != filename || !safe.ends_with(".json") {
+        return Err("Invalid export filename".to_string());
+    }
+    let mut path = downloads.join(&safe);
+    if path.exists() {
+        let stem = safe.strip_suffix(".json").unwrap_or(&safe);
+        path = downloads.join(format!(
+            "{stem}-{}.json",
+            chrono::Local::now().format("%H%M%S")
+        ));
+    }
+    std::fs::write(&path, bytes).map_err(|error| format!("Failed to save export: {error}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Abre la carpeta que contiene `path` (si es un archivo, abre su directorio padre).
+#[tauri::command]
+pub fn open_path_in_file_manager(path: String) -> Result<(), String> {
+    let p = PathBuf::from(path);
+    let target = if p.is_file() {
+        p.parent().map(|parent| parent.to_path_buf()).unwrap_or(p)
+    } else {
+        p
+    };
+    open::that(&target).map_err(|e| format!("Could not open folder: {e}"))
+}
