@@ -59,6 +59,8 @@ jobs:
         run: corepack pnpm install --frozen-lockfile
       - name: Renderer tests
         run: node --test apps/agent/src/renderer/*.test.mjs
+      - name: Browser extension lifecycle tests
+        run: node --test apps/agent/browser-extension/*.test.mjs
       - name: Renderer production build
         run: corepack pnpm --filter @flowsight/agent exec vite build
       - name: Link native Linux desktop binary
