@@ -144,10 +144,7 @@ fn release_urls(tag: &str) -> Vec<(&'static str, String)> {
     #[cfg(target_os = "macos")]
     {
         if std::env::consts::ARCH == "aarch64" {
-            vec![(
-                "tgz",
-                format!("{base}/llama-{tag}-bin-macos-arm64.tar.gz"),
-            )]
+            vec![("tgz", format!("{base}/llama-{tag}-bin-macos-arm64.tar.gz"))]
         } else {
             vec![("tgz", format!("{base}/llama-{tag}-bin-macos-x64.tar.gz"))]
         }

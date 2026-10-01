@@ -187,11 +187,8 @@ fn grab_frame_with_gstreamer(fd: &OwnedFd, node_id: u32) -> Option<Vec<u8>> {
     }
 
     let fd_num = fd.as_raw_fd();
-    let tmp = std::env::temp_dir().join(format!(
-        "flowsight_screencast_{}_{}.png",
-        node_id,
-        now_ms()
-    ));
+    let tmp =
+        std::env::temp_dir().join(format!("flowsight_screencast_{}_{}.png", node_id, now_ms()));
     let tmp_s = tmp.to_str()?;
 
     clear_fd_cloexec(fd);

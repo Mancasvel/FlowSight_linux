@@ -1,0 +1,92 @@
+name: Linux session and UI verification
+
+on:
+  pull_request:
+    paths:
+      - apps/agent/**
+      - scripts/**
+      - .github/workflows/session-updates.yml
+      - package.json
+      - pnpm-lock.yaml
+
+concurrency:
+  group: linux-session-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      TAURI_GOOGLE_CALENDAR_CLIENT_ID: ${{ vars.TAURI_GOOGLE_CALENDAR_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Native Tauri and desktop keyring dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config patchelf gstreamer1.0-tools gstreamer1.0-pipewire libpipewire-0.3-0 libdbus-1-dev gnome-keyring dbus-x11
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent/src-tauri -> target
+      - name: Compile-only resource placeholders
+        run: node scripts/prepare-ci-resource-stubs.mjs
+      - name: Native Linux compilation
+        working-directory: apps/agent/src-tauri
+        run: cargo check --locked --all-targets
+      - name: Planner and persistence format
+        working-directory: apps/agent/src-tauri
+        run: rustfmt --check --edition 2021 src/local_agent/mod.rs src/local_agent/state.rs src/local_agent/session_plan.rs src/secure_config.rs src/desktop_presence.rs src/privacy.rs src/telemetry.rs src/report_schedule.rs
+      - name: Native Linux Clippy
+        working-directory: apps/agent/src-tauri
+        run: cargo clippy --locked --all-targets
+      - name: Rust library tests
+        working-directory: apps/agent/src-tauri
+        run: cargo test --locked --lib
+      - name: Native Secret Service persistence
+        working-directory: apps/agent/src-tauri
+        run: |
+          dbus-run-session -- bash -euc '
+            printf "ci-test-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --lib secure_config::tests::native_secret_service_roundtrip -- --ignored
+          '
+      - name: Install renderer dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Renderer tests
+        run: node --test apps/agent/src/renderer/*.test.mjs
+      - name: Renderer production build
+        run: corepack pnpm --filter @flowsight/agent exec vite build
+      - name: Link native Linux desktop binary
+        working-directory: apps/agent/src-tauri
+        run: cargo build --locked
+      - name: Native Linux binary MCP startup
+        run: node scripts/check-mcp-stdio.mjs apps/agent/src-tauri/target/debug/app
+      - name: Install browser for renderer checks
+        run: corepack pnpm exec playwright install --with-deps chromium
+      - name: Session and onboarding renderer verification
+        env:
+          FLOWSIGHT_RENDERER_URL: http://127.0.0.1:1436
+        run: |
+          corepack pnpm --filter @flowsight/agent exec vite preview --host 127.0.0.1 --port 1436 > /tmp/flowsight-vite.log 2>&1 &
+          renderer_pid=$!
+          trap 'kill "$renderer_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null; then break; fi
+            sleep 1
+          done
+          curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null
+          node scripts/verify-adda-renderer.mjs
+          node scripts/verify-session-onboarding.mjs
+          node scripts/verify-localization.mjs
+          node scripts/verify-coach-conversation.mjs
+          node scripts/verify-linked-session.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-session-ui-evidence
+          path: .impeccable/review
