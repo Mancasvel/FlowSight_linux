@@ -95,19 +95,41 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify release versions, extension resources, and task options
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          node scripts/verify-release-assets.mjs
+          pnpm --filter @flowsight/agent test:renderer
+
       - name: Build Linux packages (pnpm monorepo)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_GOOGLE_CALENDAR_CLIENT_ID: ${{ vars.TAURI_GOOGLE_CALENDAR_CLIENT_ID }}
+          TAURI_MICROSOFT_CALENDAR_CLIENT_ID: ${{ vars.TAURI_MICROSOFT_CALENDAR_CLIENT_ID }}
+          FLOWSIGHT_CHROME_EXTENSION_STORE_URL: ${{ vars.FLOWSIGHT_CHROME_EXTENSION_STORE_URL }}
+          FLOWSIGHT_EDGE_EXTENSION_STORE_URL: ${{ vars.FLOWSIGHT_EDGE_EXTENSION_STORE_URL }}
           TAURI_JIRA_CLIENT_ID: ${{ secrets.TAURI_JIRA_CLIENT_ID }}
           TAURI_JIRA_CLIENT_SECRET: ${{ secrets.TAURI_JIRA_CLIENT_SECRET }}
           TAURI_LINEAR_CLIENT_ID: ${{ secrets.TAURI_LINEAR_CLIENT_ID }}
           TAURI_LINEAR_CLIENT_SECRET: ${{ secrets.TAURI_LINEAR_CLIENT_SECRET }}
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_PUBLIC_KEY }}
         run: pnpm build
 
       - name: Smoke test MCP in the packaged executable
         run: node scripts/check-mcp-stdio.mjs apps/agent/src-tauri/target/release/app
+
+      - name: Verify extension resources in the actual Debian package
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PACKAGE="$(find apps/agent/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
+          test "$(dpkg-deb -f "$PACKAGE" Version)" = "${RELEASE_TAG#v}"
+          EXTRACTED="$(mktemp -d)"
+          dpkg-deb -x "$PACKAGE" "$EXTRACTED"
+          node scripts/verify-release-assets.mjs "$EXTRACTED"
 
       - name: List bundle outputs
         run: |
@@ -120,7 +142,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          draft: true
+          draft: ${{ github.event_name != 'release' }}
           fail_on_unmatched_files: true
           # Publishing a verified draft reruns this workflow; keep its existing assets available.
           overwrite_files: false
