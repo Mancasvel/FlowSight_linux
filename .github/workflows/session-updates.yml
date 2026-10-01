@@ -84,6 +84,7 @@ jobs:
           curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null
           node scripts/verify-adda-renderer.mjs
           node scripts/verify-session-onboarding.mjs
+          node scripts/verify-recorded-time.mjs
           node scripts/verify-total-focus-extension.mjs
           node scripts/verify-localization.mjs
           node scripts/verify-coach-conversation.mjs
