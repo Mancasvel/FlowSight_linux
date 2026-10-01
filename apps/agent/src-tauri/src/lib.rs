@@ -1,3 +1,11 @@
+mod local_agent;
+mod secure_config;
+mod report_schedule;
+mod desktop_presence;
+mod focus_alerts;
+mod focus_semantics;
+mod privacy;
+mod telemetry;
 mod vision_model;
 mod llama_bin;
 mod llama_port;
@@ -36,8 +44,21 @@ use agent::{
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AgentState::default())
         .invoke_handler(tauri::generate_handler![
+            local_agent::get_local_agent_data,
+            local_agent::session_plan::propose_session_plan,
+            local_agent::session_plan::confirm_session_plan,
+            local_agent::session_plan::discard_session_plan,
+            desktop_presence::get_desktop_preferences,
+            desktop_presence::set_focus_alerts_enabled,
+            desktop_presence::set_contextual_focus_alerts_enabled,
+            report_schedule::get_weekly_report_schedule,
+            report_schedule::save_weekly_report_schedule,
+            report_schedule::save_scheduled_report_pdf,
+            paths::save_pdf_to_downloads,
             initialize_agent,
             get_config,
             update_config,
@@ -93,6 +114,8 @@ pub fn run() {
             linux_silent_capture::ensure_screencast_ready,
         ])
     .setup(|app| {
+      telemetry::start(app.handle().clone());
+      report_schedule::start_check_loop(app.handle().clone());
       if let Some(window) = app.get_webview_window("main") {
         // GNOME/Wayland: frameless custom titlebars often swallow clicks; use SSD on Linux.
         #[cfg(target_os = "linux")]

@@ -80,6 +80,7 @@ impl FlowSightAgent {
         
         agent.init_db();
         agent.load_config();
+        crate::focus_alerts::set_enabled(crate::desktop_presence::focus_alerts_enabled());
         
         // Start Background Sync (10m interval)
         crate::sync::start_sync_thread(agent.db_path.clone());
@@ -109,6 +110,10 @@ impl FlowSightAgent {
                     );
                 }
                 let _ = conn.execute("ALTER TABLE reports ADD COLUMN jira_ticket_id TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN active_app TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN window_title TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN theme_hint TEXT", []);
+
                 let _ = conn.execute(
                     "ALTER TABLE reports ADD COLUMN duration_seconds INTEGER DEFAULT 30",
                     [],
@@ -289,11 +294,17 @@ pub struct SnapshotMetadata {
 
 #[tauri::command]
 pub async fn capture_context_snapshot(
+    app: tauri::AppHandle,
     state: State<'_, AgentState>,
     user_task: Option<String>, 
     jira_ticket: Option<String>
 ) -> Result<ContextSnapshot, String> {
     
+    crate::telemetry::record_selected_task(jira_ticket.as_deref().or(user_task.as_deref()));
+    let foreground = crate::context::get_system_context();
+    if let Some(name) = foreground.app_name.as_deref() {
+        crate::focus_alerts::record_app_switch(&app, name);
+    }
     // Extract config (default to 16 if not set to ensure balanced load)
     let gpu_layers = {
         let guard = state.lock().unwrap();
@@ -431,18 +442,23 @@ pub async fn capture_context_snapshot(
 }
 
 #[tauri::command]
-pub fn save_activity(state: State<'_, AgentState>, description: String, activity_type: String, jira_ticket: Option<String>) -> Result<ActivityReport, String> {
+pub fn save_activity(app: tauri::AppHandle, state: State<'_, AgentState>, description: String, activity_type: String, jira_ticket: Option<String>, duration_seconds: Option<u64>, active_app: Option<String>) -> Result<ActivityReport, String> {
     let mut agent = state.lock().unwrap();
     let Some(a) = agent.as_mut() else {
         return Err(
             "Agent not initialized — wait for startup to finish before capturing.".to_string(),
         );
     };
+    let duration = duration_seconds.unwrap_or(30).clamp(1, 300);
     a.reports_sent += 1;
     let report_id = a
-        .save_report(&description, &activity_type, jira_ticket, 30)
+        .save_report(&description, &activity_type, jira_ticket, duration)
         .ok_or_else(|| "Failed to write activity to local database.".to_string())?;
 
+    if let Ok(conn) = Connection::open(&a.db_path) {
+        let _ = conn.execute("UPDATE reports SET active_app=?1 WHERE id=?2", params![active_app, report_id]);
+    }
+    crate::focus_alerts::review_browsing_report(&app, &a.db_path, &activity_type, duration, &description, active_app.as_deref());
     Ok(ActivityReport {
         id: Some(report_id),
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -551,6 +567,8 @@ pub fn get_status(state: State<'_, AgentState>) -> Result<serde_json::Value, Str
 pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
     if let Some(a) = state.lock().unwrap().as_mut() {
         a.is_running = true;
+        crate::focus_alerts::start_monitoring(&a.db_path);
+        crate::telemetry::set_enabled(true);
     }
     #[cfg(target_os = "linux")]
     if crate::linux_silent_capture::linux_use_silent_screencast() {
@@ -567,6 +585,8 @@ pub fn start_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
 pub fn stop_monitoring(state: State<'_, AgentState>) -> Result<bool, String> {
     if let Some(a) = state.lock().unwrap().as_mut() {
         a.is_running = false;
+        crate::focus_alerts::stop_monitoring();
+        crate::telemetry::set_enabled(false);
     }
     #[cfg(target_os = "linux")]
     crate::linux_silent_capture::stop_session();
