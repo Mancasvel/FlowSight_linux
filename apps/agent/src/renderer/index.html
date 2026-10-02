@@ -861,17 +861,62 @@
       text-align: center;
     }
 
+    .setup-card {
+      width: min(100%, 360px);
+      padding: 30px 26px 26px;
+      border-radius: 22px;
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      box-shadow: 0 20px 56px rgb(23 50 64 / 0.14);
+    }
+
+    .setup-loader {
+      width: 42px;
+      height: 42px;
+      margin: 0 auto 22px;
+      border: 3px solid hsl(var(--primary) / 0.16);
+      border-top-color: hsl(var(--primary));
+      border-radius: 50%;
+      animation: setup-spin 0.9s linear infinite;
+    }
+
+    @keyframes setup-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .setup-overlay[data-state="error"] .setup-loader {
+      position: relative;
+      animation: none;
+      border-color: hsl(var(--destructive));
+    }
+
+    .setup-overlay[data-state="error"] .setup-loader::before,
+    .setup-overlay[data-state="error"] .setup-loader::after {
+      content: '';
+      position: absolute;
+      top: 9px;
+      left: 17px;
+      width: 2px;
+      height: 18px;
+      border-radius: 2px;
+      background: hsl(var(--destructive));
+      transform: rotate(45deg);
+    }
+
+    .setup-overlay[data-state="error"] .setup-loader::after {
+      transform: rotate(-45deg);
+    }
+
     .setup-overlay[hidden] {
       display: none !important;
     }
 
     .progress-container {
       width: 100%;
-      max-width: 280px;
-      height: 8px;
+      height: 6px;
       background: hsl(var(--secondary));
       border-radius: 4px;
-      margin: 15px 0;
+      margin: 20px 0 14px;
       overflow: hidden;
     }
 
@@ -879,20 +924,29 @@
       height: 100%;
       background: hsl(var(--primary));
       width: 0%;
+      border-radius: inherit;
     }
 
     .setup-status {
-      font-size: 13px;
-      font-weight: 500;
-      margin-bottom: 4px;
+      font-family: Manrope, sans-serif;
+      font-size: 20px;
+      font-weight: 800;
+      line-height: 1.24;
+      letter-spacing: -0.025em;
+      color: hsl(var(--foreground));
     }
 
     .setup-subtext {
-      font-size: 11px;
+      font-size: 12px;
       color: hsl(var(--muted-foreground));
-      max-width: 320px;
-      line-height: 1.5;
+      max-width: 34ch;
+      margin: 0 auto;
+      line-height: 1.55;
       overflow-wrap: anywhere;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .setup-loader { animation: none; }
     }
 
     .setup-actions {
@@ -4246,14 +4300,17 @@
 
   <!-- SETUP OVERLAY -->
   <div id="setupOverlay" class="setup-overlay" hidden role="status" aria-live="polite">
-    <div class="setup-status" id="setupStatus">Preparing local AI…</div>
-    <div class="progress-container">
-      <div class="progress-bar" id="setupProgress"></div>
-    </div>
-    <div class="setup-subtext" id="setupSubtext">This may take a few minutes</div>
-    <div class="setup-actions" id="setupActions" hidden>
-      <button type="button" id="setupRetryBtn">Retry download</button>
-      <button type="button" id="setupDismissBtn">Later</button>
+    <div class="setup-card">
+      <div class="setup-loader" aria-hidden="true"></div>
+      <div class="setup-status" id="setupStatus">Preparing local AI…</div>
+      <div class="progress-container" id="setupProgressContainer" hidden>
+        <div class="progress-bar" id="setupProgress"></div>
+      </div>
+      <div class="setup-subtext" id="setupSubtext">This may take a few minutes</div>
+      <div class="setup-actions" id="setupActions" hidden>
+        <button type="button" id="setupRetryBtn">Try again</button>
+        <button type="button" id="setupDismissBtn">Later</button>
+      </div>
     </div>
   </div>
 
@@ -6778,16 +6835,19 @@
       return `${Math.round((Number(bytes) || 0) / (1024 * 1024))} MB`;
     }
 
-    // The installer contains the local runtime, while verified Qwen weights
-    // are downloaded once into user app data. Later launches work offline.
+    // Model files may be bundled or downloaded once. The runtime is cached
+    // separately so Ubuntu can recover with the CPU build if Vulkan fails.
     async function ensureLocalModelDownloaded(showStep) {
+      showStep(tr('Checking local model…'), tr('Looking for the verified model files on this device.'));
       const status = await invoke('local_model_status');
-      if (status?.ready) return;
+      if (status?.ready) {
+        showStep(tr('Model files ready'), tr('Preparing the local AI engine…'));
+        return;
+      }
 
       showStep(
         tr('Downloading local AI model…'),
-        formatMessage`One-time ${formatModelBytes(status?.totalBytes)} download. Your screen stays on this device.`,
-        2
+        formatMessage`One-time ${formatModelBytes(status?.totalBytes)} download. Your screen stays on this device.`
       );
       const unlisten = await listen('local-model-download', ({ payload }) => {
         const p = payload || {};
@@ -6795,14 +6855,14 @@
           const fileFraction = p.totalBytes > 0 ? Math.min(1, p.downloadedBytes / p.totalBytes) : 0;
           const overall = ((Number(p.index) || 1) - 1 + fileFraction) / Math.max(1, Number(p.count) || 1);
           showStep(
-            `Downloading local AI model… ${p.percent || 0}%`,
-            `File ${p.index} of ${p.count} · ${formatModelBytes(p.downloadedBytes)} / ${formatModelBytes(p.totalBytes)}`,
-            Math.max(2, Math.round(2 + overall * 16))
+            formatMessage`Downloading local AI model… ${p.percent || 0}%`,
+            formatMessage`File ${p.index} of ${p.count} · ${formatModelBytes(p.downloadedBytes)} / ${formatModelBytes(p.totalBytes)}`,
+            Math.round(overall * 100)
           );
         } else if (p.phase === 'verifying') {
-          showStep(tr('Verifying model…'), formatMessage`Checking file ${p.index} of ${p.count} against SHA-256.`, 18);
+          showStep(tr('Verifying model…'), formatMessage`Checking file ${p.index} of ${p.count} against SHA-256.`);
         } else if (p.phase === 'ready') {
-          showStep(tr('Local model ready'), tr('Starting the local AI engine…'), 19);
+          showStep(tr('Local model ready'), tr('Starting the local AI engine…'));
         }
       });
       try {
@@ -6827,37 +6887,67 @@
 
       const overlay = document.getElementById('setupOverlay');
       const progress = document.getElementById('setupProgress');
+      const progressContainer = document.getElementById('setupProgressContainer');
       const statusText = document.getElementById('setupStatus');
       const subtext = document.getElementById('setupSubtext');
       const actions = document.getElementById('setupActions');
       actions.hidden = true;
       let setupFailed = false;
       let unlistenAiProgress = null;
+      let unlistenRuntimeProgress = null;
       let aiWaitTimer = null;
-      let aiAttemptLabel = tr('Preparing the local model');
-      let aiAttemptPercent = 20;
+      let aiAttemptLabel = tr('Checking the engine and model files');
+      let aiPhaseTitle = tr('Preparing local AI…');
+      let aiProgressPercent = null;
 
-      const showStep = (status, sub = tr("Initializing..."), pct = 0) => {
+      const showStep = (status, sub = tr('Initializing…'), pct = null) => {
         setText(statusText, () => localizeStatus(status));
         setText(subtext, () => (sub));
-        progress.style.width = pct + '%';
+        const determinate = Number.isFinite(pct);
+        progress.style.width = determinate ? `${Math.max(0, Math.min(100, pct))}%` : '';
+        progressContainer.hidden = !determinate;
+        overlay.dataset.state = 'loading';
         overlay.hidden = false;
       };
 
+      showStep(tr('Preparing local AI…'), tr('Checking the engine and model files.'));
       try {
         await ensureLocalModelDownloaded(showStep);
         const startedAt = Date.now();
         const updateAiWait = () => {
           const seconds = Math.floor((Date.now() - startedAt) / 1000);
-          showStep(tr('Starting local AI…'), `${aiAttemptLabel} · ${seconds}s elapsed`, aiAttemptPercent);
+          showStep(aiPhaseTitle, formatMessage`${aiAttemptLabel} · ${seconds}s elapsed`, aiProgressPercent);
         };
         updateAiWait();
+        unlistenRuntimeProgress = await listen('local-ai-progress', ({ payload }) => {
+          const p = payload || {};
+          if (p.phase === 'llama-bin') {
+            aiPhaseTitle = tr('Downloading AI engine…');
+            aiAttemptLabel = Number(p.total) > 0
+              ? formatMessage`${formatModelBytes(p.downloaded)} of ${formatModelBytes(p.total)}`
+              : tr('First-time setup');
+            aiProgressPercent = Number(p.total) > 0 && Number.isFinite(p.percent) ? Number(p.percent) : null;
+          } else if (p.phase === 'extracting') {
+            aiPhaseTitle = tr('Installing AI engine…');
+            aiAttemptLabel = tr('Preparing the local runtime');
+            aiProgressPercent = null;
+          }
+          updateAiWait();
+        }).catch((error) => {
+          console.warn('[Local AI] Runtime progress unavailable:', error);
+          return null;
+        });
         unlistenAiProgress = await listen('local-ai-startup-progress', ({ payload }) => {
           const attempt = Number(payload?.attempt) || 1;
           const total = Number(payload?.total) || 1;
           const backend = String(payload?.backend || tr('local AI'));
-          aiAttemptLabel = `Trying ${backend} (${attempt}/${total})`;
-          aiAttemptPercent = Math.min(52, 20 + Math.round((attempt - 1) / total * 32));
+          aiPhaseTitle = payload?.phase === 'loading'
+            ? tr('Loading the local model…')
+            : payload?.phase === 'ready'
+              ? tr('Local AI ready')
+              : tr('Preparing local AI…');
+          aiAttemptLabel = formatMessage`${backend} · attempt ${attempt} of ${total}`;
+          aiProgressPercent = null;
           updateAiWait();
         }).catch((error) => {
           console.warn('[Local AI] Startup progress unavailable:', error);
@@ -6868,12 +6958,10 @@
         const res = await invoke('start_server');
         clearInterval(aiWaitTimer);
         aiWaitTimer = null;
-        unlistenAiProgress?.();
-        unlistenAiProgress = null;
         console.log("Server Start Result:", res);
 
         if (res.status === 'started' || res.status === 'already_running') {
-          showStep(tr("Verifying Server..."), tr("Waiting for health check — first start or slow disk may take several minutes…"), 58);
+          showStep(tr('Checking local AI…'), tr('Waiting for the model to become ready.'));
 
           /** @type {number|null} */
           let lastUiSec = null;
@@ -6882,18 +6970,16 @@
             if (elapsedSec % 5 !== 0 && elapsedSec < 120 && elapsedSec !== 1) return;
             if (lastUiSec === elapsedSec) return;
             lastUiSec = elapsedSec;
-            const pct = Math.min(84, 56 + Math.floor(elapsedSec / 18));
             showStep(
-              tr("Verifying Server…"),
-              `Waiting for health (${elapsedSec}s) — local model is loading. Antivirus or a full disk can slow this step.`,
-              pct
+              tr('Loading the local model…'),
+              formatMessage`Waiting for the local engine · ${elapsedSec}s elapsed`
             );
           };
 
           const spawnedThisSession = res.status === 'started';
           const skipCpuFallback = res.gpuAuto === true;
-          const HEALTH_POLL_MAX = 900;
-          const CPU_FALLBACK_AFTER_SEC = 240;
+          const HEALTH_POLL_MAX = 300;
+          const CPU_FALLBACK_AFTER_SEC = 90;
           let polls = 0;
           let online = false;
           let cpuFallbackDone = false;
@@ -6909,6 +6995,12 @@
             if (spawnedThisSession) {
               proc = await invoke("llama_managed_process_status");
               if (proc.managed === true && proc.alive === false) {
+                if (!cpuFallbackDone && Number(res.gpuLayers) > 0) {
+                  cpuFallbackDone = true;
+                  showStep(tr('Switching to CPU…'), tr('The GPU engine stopped. Trying the compatible CPU engine.'));
+                  await invoke('restart_llama_server_cpu_only');
+                  continue;
+                }
                 const tail = await invoke("llama_server_log_tail", { max_chars: 900 }).catch(() => "");
                 const rp = await getFlowsightResolvedPaths();
                 const logRef =
@@ -6931,9 +7023,8 @@
                 if (!sniff.online) {
                   cpuFallbackDone = true;
                   showStep(
-                    tr("Verifying Server…"),
-                    tr("No health response yet — restarting on CPU only (slower but more compatible)."),
-                    64
+                    tr('Switching to CPU…'),
+                    tr('The GPU engine is taking too long. Trying the compatible CPU engine.')
                   );
                   await invoke("restart_llama_server_cpu_only");
                 }
@@ -6964,7 +7055,7 @@
         overlay.hidden = true;
         const layerSuffix =
           typeof res.gpuLayers === 'number'
-            ? ` (${res.gpuLayers} GPU layers${res.gpuAuto ? ', auto-selected' : ''})`
+            ? res.gpuLayers === 0 ? ' (CPU)' : ` (${res.gpuLayers} GPU layers${res.gpuAuto ? ', auto-selected' : ''})`
             : '';
         showToast(formatMessage`Local AI Server Ready${layerSuffix}`, 'success');
 
@@ -6983,15 +7074,20 @@
         localServerConfirmedOnline = true;
         await checkLocalServerHealth();
       } catch (e) {
-        console.warn('[Local AI] Start failed; checking installation.');
+        console.warn('[Local AI] Start failed:', e);
         installationCheckPromise = installationRepair.check();
         if (!(await installationCheckPromise)) {
           overlay.hidden = true;
         } else {
           setupFailed = true;
-          progress.style.width = '100%';
-          setText(statusText, () => (tr('Local AI is not ready')));
-          setText(subtext, () => (tr('FlowSight could not prepare local AI. Please try again, or restart the app.')));
+          const reason = String(e?.message || e || '');
+          const downloadFailed = /download|network|connection|HTTP|GET /i.test(reason);
+          overlay.dataset.state = 'error';
+          progressContainer.hidden = true;
+          setText(statusText, () => tr(downloadFailed ? 'Download interrupted' : 'Local AI could not start'));
+          setText(subtext, () => tr(downloadFailed
+            ? 'Connect to the internet and try again. Your existing work data is safe.'
+            : 'Try again. If this continues, restart FlowSight and check that Ubuntu has enough free memory.'));
           actions.hidden = false;
           document.getElementById('setupRetryBtn').onclick = () => {
             overlay.hidden = true;
@@ -7002,10 +7098,12 @@
             actions.hidden = true;
           };
           overlay.hidden = false;
+          document.getElementById('setupRetryBtn').focus();
         }
       } finally {
         if (aiWaitTimer) clearInterval(aiWaitTimer);
         unlistenAiProgress?.();
+        unlistenRuntimeProgress?.();
         if (!setupFailed) overlay.hidden = true;
         setupInProgress = false;
         btn.disabled = false;

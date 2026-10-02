@@ -89,6 +89,7 @@ jobs:
           node scripts/verify-localization.mjs
           node scripts/verify-coach-conversation.mjs
           node scripts/verify-linked-session.mjs
+          node scripts/verify-local-ai-loading.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

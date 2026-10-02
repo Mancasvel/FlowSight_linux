@@ -3,7 +3,8 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use tauri::AppHandle;
@@ -12,6 +13,7 @@ use tauri::Emitter;
 // Qwen3-VL requires a recent llama.cpp runtime. Pin it, rather than allowing
 // an older cached runtime or a future incompatible latest release.
 const LLAMA_RELEASE_TAG: &str = "b10666";
+static RUNTIME_INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn exe_name() -> &'static str {
     if cfg!(windows) {
@@ -119,11 +121,12 @@ fn validate_binary(path: &Path) -> Result<(), String> {
     ))
 }
 
-fn release_urls(tag: &str) -> Vec<(&'static str, String)> {
+fn release_urls(tag: &str, cpu_only: bool) -> Vec<(&'static str, String)> {
     let base = format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}");
 
     #[cfg(windows)]
     {
+        let _ = cpu_only;
         vec![
             ("zip", format!("{base}/llama-{tag}-bin-win-vulkan-x64.zip")),
             ("zip", format!("{base}/llama-{tag}-bin-win-cpu-x64.zip")),
@@ -132,17 +135,28 @@ fn release_urls(tag: &str) -> Vec<(&'static str, String)> {
 
     #[cfg(all(unix, target_os = "linux"))]
     {
-        vec![
-            (
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            _ => return vec![],
+        };
+        let cpu = (
+            "tgz",
+            format!("{base}/llama-{tag}-bin-ubuntu-{arch}.tar.gz"),
+        );
+        if cpu_only {
+            vec![cpu]
+        } else {
+            vec![(
                 "tgz",
-                format!("{base}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz"),
-            ),
-            ("tgz", format!("{base}/llama-{tag}-bin-ubuntu-x64.tar.gz")),
-        ]
+                format!("{base}/llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz"),
+            )]
+        }
     }
 
     #[cfg(target_os = "macos")]
     {
+        let _ = cpu_only;
         if std::env::consts::ARCH == "aarch64" {
             vec![("tgz", format!("{base}/llama-{tag}-bin-macos-arm64.tar.gz"))]
         } else {
@@ -152,6 +166,7 @@ fn release_urls(tag: &str) -> Vec<(&'static str, String)> {
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
+        let _ = (tag, cpu_only, base);
         vec![]
     }
 }
@@ -179,6 +194,7 @@ fn download_bytes(url: &str, dest: &Path, app: &AppHandle, label: &str) -> Resul
     let mut f = File::create(dest).map_err(|e| e.to_string())?;
     let mut buf = [0u8; 65536];
     let mut downloaded: u64 = 0;
+    let mut last_emit = Instant::now() - Duration::from_millis(300);
 
     loop {
         let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
@@ -192,16 +208,19 @@ fn download_bytes(url: &str, dest: &Path, app: &AppHandle, label: &str) -> Resul
         } else {
             0
         };
-        let _ = app.emit(
-            "local-ai-progress",
-            serde_json::json!({
-                "phase": "llama-bin",
-                "message": format!("{} — {:.1} MB", label, downloaded as f64 / 1_048_576.0),
-                "percent": pct,
-                "downloaded": downloaded,
-                "total": total,
-            }),
-        );
+        if last_emit.elapsed() >= Duration::from_millis(300) || (total > 0 && downloaded >= total) {
+            last_emit = Instant::now();
+            let _ = app.emit(
+                "local-ai-progress",
+                serde_json::json!({
+                    "phase": "llama-bin",
+                    "message": format!("{} — {:.1} MB", label, downloaded as f64 / 1_048_576.0),
+                    "percent": pct,
+                    "downloaded": downloaded,
+                    "total": total,
+                }),
+            );
+        }
     }
     f.sync_all().map_err(|e| e.to_string())?;
     Ok(())
@@ -230,19 +249,35 @@ fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
 }
 
 /// Ensures `llama-server` exists: dev checkout, app data `bin/`, or download from GitHub releases.
-pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<PathBuf, String> {
-    if let Some(p) = find_dev_repo_bin() {
-        #[cfg(unix)]
-        let _ = make_executable(&p);
-        validate_binary(&p)?;
-        return Ok(p);
+pub fn ensure_llama_server(
+    app: &AppHandle,
+    storage_bin: PathBuf,
+    cpu_only: bool,
+) -> Result<PathBuf, String> {
+    if !cpu_only {
+        if let Some(p) = find_dev_repo_bin() {
+            #[cfg(unix)]
+            let _ = make_executable(&p);
+            validate_binary(&p)?;
+            return Ok(p);
+        }
     }
 
+    let _install_guard = RUNTIME_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::fs::create_dir_all(&storage_bin).map_err(|e| e.to_string())?;
     if let Some(p) = find_llama_executable(&storage_bin) {
         #[cfg(unix)]
         let _ = make_executable(&p);
-        return validate_binary(&p).map(|_| p);
+        match validate_binary(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) => {
+                log::warn!("[LocalAI] cached llama runtime invalid; reinstalling: {e}");
+                std::fs::remove_dir_all(&storage_bin).map_err(|err| err.to_string())?;
+                std::fs::create_dir_all(&storage_bin).map_err(|err| err.to_string())?;
+            }
+        }
     }
 
     let _ = app.emit(
@@ -254,7 +289,7 @@ pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<Path
         }),
     );
 
-    let candidates = release_urls(LLAMA_RELEASE_TAG);
+    let candidates = release_urls(LLAMA_RELEASE_TAG, cpu_only);
     if candidates.is_empty() {
         return Err("Unsupported OS for automatic llama-server download.".to_string());
     }
@@ -279,6 +314,15 @@ pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<Path
             continue;
         }
 
+        let _ = app.emit(
+            "local-ai-progress",
+            serde_json::json!({
+                "phase": "extracting",
+                "message": "Installing local AI engine…",
+            }),
+        );
+        std::fs::remove_dir_all(&storage_bin).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&storage_bin).map_err(|e| e.to_string())?;
         let extract_ok = match kind {
             "tgz" => extract_tgz(&tmp, &storage_bin),
             #[cfg(windows)]
@@ -298,7 +342,13 @@ pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<Path
         if let Some(p) = find_llama_executable(&storage_bin) {
             #[cfg(unix)]
             let _ = make_executable(&p);
-            return validate_binary(&p).map(|_| p);
+            match validate_binary(&p) {
+                Ok(()) => return Ok(p),
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            }
         }
         last_err = "extracted archive but llama-server not found".to_string();
     }
@@ -306,4 +356,20 @@ pub fn ensure_llama_server(app: &AppHandle, storage_bin: PathBuf) -> Result<Path
     Err(format!(
         "Could not install llama-server automatically. Last error: {last_err}"
     ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::release_urls;
+
+    #[test]
+    fn ubuntu_cpu_runtime_is_separate_from_vulkan_runtime() {
+        let gpu = release_urls("b10666", false);
+        let cpu = release_urls("b10666", true);
+        assert_eq!(gpu.len(), 1);
+        assert_eq!(cpu.len(), 1);
+        assert!(gpu[0].1.contains("ubuntu-vulkan-"));
+        assert!(cpu[0].1.contains("ubuntu-"));
+        assert!(!cpu[0].1.contains("vulkan"));
+    }
 }
