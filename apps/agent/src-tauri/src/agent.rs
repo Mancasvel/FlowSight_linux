@@ -138,6 +138,9 @@ impl FlowSightAgent {
                     "ALTER TABLE reports ADD COLUMN duration_seconds INTEGER DEFAULT 30",
                     [],
                 );
+                if let Err(error) = conn.execute_batch(crate::sync_pure::PENDING_REPORT_INDEX_SQL) {
+                    log::warn!("[Agent] Could not index pending reports: {error}");
+                }
             }
             Err(e) => log::error!(
                 "[Agent] SQLite open failed {:?} (init_db): {}",
@@ -783,8 +786,7 @@ fn load_day_history_entries(conn: &Connection, day: &str) -> Result<Vec<DayHisto
             ))
         })
         .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+        .filter_map(Result::ok);
 
     let mut entries = Vec::new();
     for (time, description, raw_category, ticket, duration, app, title, source, theme) in rows {

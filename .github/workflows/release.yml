@@ -70,6 +70,8 @@ jobs:
 
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Linux — Tauri + ScreenCast (GStreamer/PipeWire) deps
         run: |
@@ -101,6 +103,17 @@ jobs:
         run: |
           node scripts/verify-release-assets.mjs
           pnpm --filter @flowsight/agent test:renderer
+
+      - name: Fetch and verify model resources before native tests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/fetch-models.mjs
+
+      - name: Verify native algorithms before packaging
+        run: |
+          cargo fmt --manifest-path apps/agent/src-tauri/Cargo.toml --all -- --check
+          cargo test --manifest-path apps/agent/src-tauri/Cargo.toml --lib
+          cargo clippy --manifest-path apps/agent/src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Linux packages (pnpm monorepo)
         env:
