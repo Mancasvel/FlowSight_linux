@@ -169,6 +169,8 @@ pub fn canonicalize_category(value: &str) -> String {
     }
 }
 
+// Linux keeps its current prompt; this shared helper is covered by unit tests.
+#[cfg(test)]
 pub fn allowed_categories_prompt() -> String {
     CATEGORY_POLICIES
         .iter()

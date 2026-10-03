@@ -104,6 +104,13 @@ pub fn load_secret(conn: &Connection, key: &str) -> Result<Option<String>, Strin
     Ok(Some(stored))
 }
 
+/// Delete a credential without reading or replacing the desktop master key.
+pub fn delete_secret(conn: &Connection, key: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM config WHERE key=?1", params![key])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,11 +151,4 @@ mod tests {
             .delete_credential()
             .unwrap();
     }
-}
-
-/// Delete a credential without reading or replacing the desktop master key.
-pub fn delete_secret(conn: &Connection, key: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM config WHERE key=?1", params![key])
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }

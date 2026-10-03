@@ -23,6 +23,8 @@ pub(crate) fn parse_analysis(raw: &str) -> (String, String) {
 /// describes the content, but a small screenshot model cannot overrule an
 /// unambiguous executable/title prior. Browser alone is intentionally not a
 /// category: its title/content decides Research, engineering, or Browsing.
+// Retain the shared correction helper without enabling it in the Linux pipeline.
+#[allow(dead_code)]
 pub(crate) fn correct_category_with_window(
     category: &str,
     app_name: Option<&str>,

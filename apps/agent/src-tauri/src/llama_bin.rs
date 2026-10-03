@@ -203,11 +203,10 @@ fn download_bytes(url: &str, dest: &Path, app: &AppHandle, label: &str) -> Resul
         }
         f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         downloaded += n as u64;
-        let pct: u8 = if total > 0 {
-            (((downloaded.min(total)) * 100) / total).min(100) as u8
-        } else {
-            0
-        };
+        let pct = (downloaded.min(total) * 100)
+            .checked_div(total)
+            .unwrap_or(0)
+            .min(100) as u8;
         if last_emit.elapsed() >= Duration::from_millis(300) || (total > 0 && downloaded >= total) {
             last_emit = Instant::now();
             let _ = app.emit(

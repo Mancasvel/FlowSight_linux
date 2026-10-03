@@ -203,6 +203,8 @@ pub fn require_cloud_ai(db_path: &Path) -> Result<(), String> {
     }
 }
 
+// Retain the shared privacy accessor without changing Linux's existing policy.
+#[allow(dead_code)]
 pub fn store_window_titles(db_path: &Path) -> bool {
     load_privacy_settings(db_path)
         .map(|settings| settings.store_window_titles)

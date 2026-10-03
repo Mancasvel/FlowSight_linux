@@ -1,9 +1,6 @@
 use crate::agent_pure::{parse_analysis, resolve_persisted_category};
 use crate::focus_semantics::{canonical_ticket_value, LocalDateWindow};
-use crate::vision_model::{
-    CONFIG_VISION_MODEL_ID, LLAMA_CHAT_MODEL_ID, VISION_GGUF_FILENAME, VISION_MMPROJ_FILENAME,
-    VISION_STATUS_LABEL,
-};
+use crate::vision_model::{CONFIG_VISION_MODEL_ID, LLAMA_CHAT_MODEL_ID, VISION_STATUS_LABEL};
 use chrono::{Datelike, Local};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -271,11 +268,7 @@ impl FlowSightAgent {
                         timestamp: row.get(4)?,
                     })
                 }) {
-                    for row_result in rows {
-                        if let Ok(report) = row_result {
-                            reports.push(report);
-                        }
-                    }
+                    reports.extend(rows.flatten());
                 }
             }
         }
@@ -1092,7 +1085,7 @@ static SERVER_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 const LLAMA_LISTEN_PORT_SPAWN_ATTEMPTS: u8 = 8;
 
 fn clamp_llama_gpu_layers(n: i32) -> i32 {
-    n.max(0).min(16_384)
+    n.clamp(0, 16_384)
 }
 
 /// Descending CUDA/Vulkan offload steps for vision GGUF (+ mmproj): try the highest that
@@ -1280,6 +1273,8 @@ pub fn llama_server_log_tail(max_chars: Option<usize>) -> Result<String, String>
     Ok(read_server_log_tail_chars(n))
 }
 
+// Keep the shared platform launch interface while preserving its existing flags.
+#[allow(clippy::too_many_arguments)]
 fn configure_llama_command(
     bin_path: &Path,
     model_path: &Path,
@@ -1458,7 +1453,7 @@ fn try_spawn_llama_process(
             true,
             None,
         )
-        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?;
+        .map_err(std::io::Error::other)?;
         cmd.spawn()
     }
 }
@@ -1469,7 +1464,7 @@ fn spawn_llama_managed_child(
     vulkan_visible_device_index: Option<&str>,
 ) -> Result<std::process::Child, String> {
     let (model_path, mmproj_path) = crate::model_assets::ensure_vision_weights(app)?;
-    let weights_dir =
+    let _weights_dir =
         crate::paths::resource_local_llm_dir(app).unwrap_or(crate::paths::local_llm_storage_dir()?);
     let cpu_only_runtime = cfg!(target_os = "linux") && gpu_layers == 0;
     let storage_name = if cpu_only_runtime {
@@ -1801,10 +1796,10 @@ pub fn stop_server() -> Result<bool, String> {
     #[cfg(windows)]
     crate::llama_windows_job::reset_llama_job();
 
-    use std::process::Command;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        use std::process::Command;
         let _ = Command::new("taskkill")
             .args(["/F", "/IM", "llama-server.exe"])
             .creation_flags(0x08000000)
@@ -2040,7 +2035,7 @@ mod repetition_tests {
 
     #[test]
     fn truncate_collapses_many_repeated_words() {
-        let spam: String = std::iter::repeat("spam ").take(25).collect();
+        let spam = "spam ".repeat(25);
         let out = truncate_repetition(spam.trim());
         assert!(out.len() < spam.len());
     }

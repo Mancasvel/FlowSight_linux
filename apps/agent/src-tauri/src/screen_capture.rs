@@ -391,18 +391,14 @@ pub fn ensure_linux_capture_dependencies() -> Result<serde_json::Value, String> 
         }
 
         match try_distro_install_capture_tools() {
-            Ok(detail) => {
-                return Ok(serde_json::json!({
-                    "status": "installed",
-                    "message": detail
-                }));
-            }
-            Err(e) => {
-                return Ok(serde_json::json!({
-                    "status": "install_failed",
-                    "message": e
-                }));
-            }
+            Ok(detail) => Ok(serde_json::json!({
+                "status": "installed",
+                "message": detail
+            })),
+            Err(e) => Ok(serde_json::json!({
+                "status": "install_failed",
+                "message": e
+            })),
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -654,12 +650,15 @@ fn linux_capture_to_tmp(cmd: &str, args: &[&str]) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
+type CaptureStep = (&'static str, fn() -> Option<Vec<u8>>);
+
+#[cfg(target_os = "linux")]
 fn capture_linux() -> Result<(String, PathBuf), String> {
     let gnome = linux_is_gnome_session();
     let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
     // GNOME 49+ blocks legacy gnome-screenshot API (flash + shutter). Prefer portal, then Shell D-Bus.
-    let mut pipeline: Vec<(&'static str, fn() -> Option<Vec<u8>>)> = Vec::new();
+    let mut pipeline: Vec<CaptureStep> = Vec::new();
 
     // GNOME: never Shell Screenshot or portal (flash + sound). ScreenCast runs in agent.rs.
     if gnome {

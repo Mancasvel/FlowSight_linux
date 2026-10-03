@@ -9,7 +9,7 @@ pub(crate) const PENDING_REPORT_INDEX_SQL: &str =
 
 /// Batch of unsynced rows (oldest first) for `perform_sync`. `limit` is clamped to 1..=5000.
 pub(crate) fn select_unsynced_pending_sql(limit: usize) -> String {
-    let lim = limit.max(1).min(5000);
+    let lim = limit.clamp(1, 5000);
     format!(
         "SELECT id, description, activity_type, duration_seconds, jira_ticket_id \
          FROM reports \
