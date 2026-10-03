@@ -41,6 +41,7 @@ body,
 .app-shell,
 .cloud-activation-overlay,
 .onboarding-overlay { background-color: #101d25; }
+.setup-overlay { background: rgb(16 29 37 / 0.97); }
 .app-titlebar { background: #162630; border-color: #2a414b; }
 .titlebar-name,
 .today-greeting,

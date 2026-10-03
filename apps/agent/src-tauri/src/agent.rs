@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Emitter, State};
 
 pub type AgentState = Mutex<Option<FlowSightAgent>>;
 
@@ -1084,6 +1084,7 @@ pub fn check_ollama() -> Result<serde_json::Value, String> {
 // LLAMA SERVER COMMANDS
 
 static SERVER_PROCESS: Mutex<Option<std::process::Child>> = Mutex::new(None);
+static SERVER_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 
 /// Puertos nuevos ante `EADDRINUSE`/fallo rápido de escucha tras TOCTOU o TIME_WAIT.
 const LLAMA_LISTEN_PORT_SPAWN_ATTEMPTS: u8 = 8;
@@ -1101,6 +1102,42 @@ const AUTO_TIER_HEALTH_WAIT_SECS: u64 = 56;
 /// separado (`GGML_VK_VISIBLE_DEVICES` en ggml-vulkan). Útil cuando el primer dispositivo
 /// Vulkan de la lista es inválido para cómputo (GPU dual, drivers híbridos, `vkCreateFence`).
 const AUTO_VULKAN_VISIBLE_DEVICE_TRIES: &[&str] = &["0", "1", "2", "3"];
+
+fn auto_startup_attempts() -> Vec<(Option<&'static str>, i32)> {
+    if cfg!(target_os = "linux") {
+        // One conservative Vulkan attempt, then the separate CPU runtime.
+        // Repeating every GPU tier on every visible device can leave Ubuntu
+        // apparently frozen for many minutes on machines with broken Vulkan.
+        return vec![(None, 24), (None, 0)];
+    }
+    std::iter::once(None)
+        .chain(AUTO_VULKAN_VISIBLE_DEVICE_TRIES.iter().copied().map(Some))
+        .flat_map(|device| {
+            AUTO_GPU_LAYER_TIERS
+                .iter()
+                .copied()
+                .map(move |layers| (device, layers))
+        })
+        .collect()
+}
+
+fn emit_startup_progress(
+    app: &tauri::AppHandle,
+    phase: &str,
+    backend: &str,
+    attempt: usize,
+    total: usize,
+) {
+    let _ = app.emit(
+        "local-ai-startup-progress",
+        serde_json::json!({
+            "phase": phase,
+            "backend": backend,
+            "attempt": attempt,
+            "total": total,
+        }),
+    );
+}
 
 #[derive(Clone, Copy, Debug)]
 enum GpuServeMode {
@@ -1165,7 +1202,8 @@ pub fn ensure_local_llm_ready(
     }
 
     log::info!("[LocalReport] Local AI offline — starting server for insight generation…");
-    let result = start_server(app, state)?;
+    let mode = gpu_serve_mode(&state);
+    let result = start_server_with_mode(&app, mode)?;
     let status = result["status"].as_str().unwrap_or("");
     if status != "started" && status != "already_running" {
         return Err(format!("Could not start local AI: {}", result));
@@ -1183,6 +1221,19 @@ pub fn ensure_local_llm_ready(
     ))
 }
 
+fn tail_chars(s: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+    let start = s
+        .char_indices()
+        .rev()
+        .nth(max_chars - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    &s[start..]
+}
+
 fn read_server_log_tail_chars(max_chars: usize) -> String {
     let Ok(path) = crate::paths::server_log_path() else {
         return String::new();
@@ -1190,11 +1241,7 @@ fn read_server_log_tail_chars(max_chars: usize) -> String {
     let Ok(s) = std::fs::read_to_string(&path) else {
         return String::new();
     };
-    if s.len() <= max_chars {
-        s
-    } else {
-        s[s.len() - max_chars..].to_string()
-    }
+    tail_chars(&s, max_chars).to_string()
 }
 
 /// Estado del proceso hijo que FlowSight lanzó (no confundir con un llama-server huérfano).
@@ -1227,7 +1274,7 @@ pub fn llama_managed_process_status() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub fn llama_server_log_tail(max_chars: Option<usize>) -> Result<String, String> {
-    let n = max_chars.unwrap_or(1_200).max(200);
+    let n = max_chars.unwrap_or(1_200).clamp(200, 5_000);
     Ok(read_server_log_tail_chars(n))
 }
 
@@ -1266,9 +1313,13 @@ fn configure_llama_command(
         .arg("--port")
         .arg(listen_port.to_string())
         .arg("--ctx-size")
-        .arg("8192")
+        .arg(if cfg!(target_os = "linux") {
+            "4096"
+        } else {
+            "8192"
+        })
         .arg("--parallel")
-        .arg("2")
+        .arg(if cfg!(target_os = "linux") { "1" } else { "2" })
         .arg("--threads")
         .arg("2")
         .arg("--n-gpu-layers")
@@ -1418,9 +1469,16 @@ fn spawn_llama_managed_child(
     let (model_path, mmproj_path) = crate::model_assets::ensure_vision_weights(app)?;
     let weights_dir =
         crate::paths::resource_local_llm_dir(app).unwrap_or(crate::paths::local_llm_storage_dir()?);
+    let cpu_only_runtime = cfg!(target_os = "linux") && gpu_layers == 0;
+    let storage_name = if cpu_only_runtime {
+        "bin-b10666-cpu"
+    } else {
+        "bin-b10666"
+    };
     let bin_path = crate::llama_bin::ensure_llama_server(
         app,
-        crate::paths::local_llm_storage_dir()?.join("bin-b10666"),
+        crate::paths::local_llm_storage_dir()?.join(storage_name),
+        cpu_only_runtime,
     )?;
 
     if !model_path.exists() {
@@ -1529,14 +1587,38 @@ fn spawn_llama_managed_child(
 /// Arranca llama-server: modo automático sube desde capas GPU altas hasta que `/health`
 /// responda; modo manual fuerza `--n-gpu-layers` fijo.
 #[tauri::command]
-pub fn start_server(
+pub async fn start_server(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
 ) -> Result<serde_json::Value, String> {
     let mode = gpu_serve_mode(&state);
+    tauri::async_runtime::spawn_blocking(move || start_server_with_mode(&app, mode))
+        .await
+        .map_err(|e| format!("Local AI startup task failed: {e}"))?
+}
+
+fn start_server_with_mode(
+    app: &tauri::AppHandle,
+    mode: GpuServeMode,
+) -> Result<serde_json::Value, String> {
+    let _startup_guard = SERVER_STARTUP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     {
-        let guard = SERVER_PROCESS.lock().unwrap();
-        if guard.is_some() {
+        let mut guard = SERVER_PROCESS.lock().unwrap();
+        let running = match guard.as_mut().map(|child| child.try_wait()) {
+            Some(Ok(None)) => true,
+            Some(Err(e)) => {
+                log::warn!("[LocalAI] could not inspect managed server; replacing it: {e}");
+                if let Some(child) = guard.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                false
+            }
+            _ => false,
+        };
+        if running {
             return Ok(serde_json::json!({
                 "status": "already_running",
                 "message": "Server is already running",
@@ -1544,13 +1626,30 @@ pub fn start_server(
                 "localServerPort": crate::llama_port::current_managed_listen_port(),
             }));
         }
+        if guard.take().is_some() {
+            crate::llama_port::clear_managed_llama_port();
+        }
     }
 
     match mode {
         GpuServeMode::Manual(gpu_layers) => {
+            emit_startup_progress(
+                app,
+                "preparing",
+                if gpu_layers == 0 { "CPU" } else { "GPU" },
+                1,
+                1,
+            );
             let mut guard = SERVER_PROCESS.lock().unwrap();
-            let child = spawn_llama_managed_child(&app, gpu_layers, None)?;
+            let child = spawn_llama_managed_child(app, gpu_layers, None)?;
             *guard = Some(child);
+            emit_startup_progress(
+                app,
+                "loading",
+                if gpu_layers == 0 { "CPU" } else { "GPU" },
+                1,
+                1,
+            );
             Ok(serde_json::json!({
                 "status": "started",
                 "pid": "managed",
@@ -1562,75 +1661,82 @@ pub fn start_server(
         }
         GpuServeMode::Automatic => {
             let mut last_err = String::from("unknown auto-start error");
-
-            let vk_rounds: Vec<Option<&str>> = std::iter::once(None)
-                .chain(AUTO_VULKAN_VISIBLE_DEVICE_TRIES.iter().copied().map(Some))
-                .collect();
-
-            for vk_vis in vk_rounds {
+            let attempts = auto_startup_attempts();
+            let total = attempts.len();
+            for (index, (vk_vis, layers)) in attempts.into_iter().enumerate() {
+                let attempt = index + 1;
+                let backend = if layers == 0 { "CPU" } else { "Vulkan GPU" };
+                emit_startup_progress(app, "preparing", backend, attempt, total);
                 let vk_label = vk_vis.unwrap_or("default");
-                for &layers in AUTO_GPU_LAYER_TIERS {
-                    let _ = stop_server();
-                    std::thread::sleep(std::time::Duration::from_millis(450));
+                let _ = stop_server();
+                std::thread::sleep(std::time::Duration::from_millis(450));
 
-                    let child = match spawn_llama_managed_child(&app, layers, vk_vis) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            log::warn!(
+                let child = match spawn_llama_managed_child(app, layers, vk_vis) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!(
                                 "[FlowSight llama-server] Auto tier GGML_VK_VISIBLE_DEVICES={} gpu_layers={} spawn failed: {}",
                                 vk_label,
                                 layers,
                                 e
                             );
-                            last_err = e;
-                            continue;
-                        }
-                    };
-
-                    {
-                        let mut guard = SERVER_PROCESS.lock().unwrap();
-                        *guard = Some(child);
+                        last_err = e;
+                        continue;
                     }
+                };
 
-                    log::info!(
+                {
+                    let mut guard = SERVER_PROCESS.lock().unwrap();
+                    *guard = Some(child);
+                }
+                emit_startup_progress(app, "loading", backend, attempt, total);
+
+                let health_wait_secs = if cfg!(target_os = "linux") && layers == 0 {
+                    120
+                } else {
+                    AUTO_TIER_HEALTH_WAIT_SECS
+                };
+
+                log::info!(
                         "[FlowSight llama-server] Auto tier GGML_VK_VISIBLE_DEVICES={} gpu_layers={}, waiting health up to {}s",
                         vk_label,
                         layers,
-                        AUTO_TIER_HEALTH_WAIT_SECS
+                        health_wait_secs
                     );
 
-                    if wait_for_managed_health_secs(AUTO_TIER_HEALTH_WAIT_SECS) {
-                        return Ok(serde_json::json!({
-                            "status": "started",
-                            "pid": "managed",
-                            "model": VISION_STATUS_LABEL,
-                            "gpuLayers": layers,
-                            "gpuAuto": true,
-                            "vulkanVisibleDevice": vk_label,
-                            "localServerPort": crate::llama_port::current_managed_listen_port(),
-                        }));
-                    }
-
-                    last_err = format!(
-                        "GGML_VK_VISIBLE_DEVICES={} gpu_layers={} did not reach /health within {}s{}",
-                        vk_label,
-                        layers,
-                        AUTO_TIER_HEALTH_WAIT_SECS,
-                        {
-                            let t = read_server_log_tail_chars(800);
-                            if t.is_empty() {
-                                String::new()
-                            } else {
-                                format!(". Last log excerpt: {}", t)
-                            }
-                        }
-                    );
-                    log::warn!("[FlowSight llama-server] {}", last_err);
-                    let _ = stop_server();
-                    std::thread::sleep(std::time::Duration::from_millis(350));
+                if wait_for_managed_health_secs(health_wait_secs) {
+                    emit_startup_progress(app, "ready", backend, attempt, total);
+                    return Ok(serde_json::json!({
+                        "status": "started",
+                        "pid": "managed",
+                        "model": VISION_STATUS_LABEL,
+                        "gpuLayers": layers,
+                        "gpuAuto": true,
+                        "vulkanVisibleDevice": vk_label,
+                        "localServerPort": crate::llama_port::current_managed_listen_port(),
+                    }));
                 }
+
+                last_err = format!(
+                    "GGML_VK_VISIBLE_DEVICES={} gpu_layers={} did not reach /health within {}s{}",
+                    vk_label,
+                    layers,
+                    health_wait_secs,
+                    {
+                        let t = read_server_log_tail_chars(800);
+                        if t.is_empty() {
+                            String::new()
+                        } else {
+                            format!(". Last log excerpt: {}", t)
+                        }
+                    }
+                );
+                log::warn!("[FlowSight llama-server] {}", last_err);
+                let _ = stop_server();
+                std::thread::sleep(std::time::Duration::from_millis(350));
             }
 
+            emit_startup_progress(app, "error", "local AI", total, total);
             Err(format!(
                 "Automatic GPU tier startup failed on all steps. {}",
                 last_err
@@ -1641,7 +1747,21 @@ pub fn start_server(
 
 /// Tras fallos interminables con GPU (drivers/hardware), reinicia sólo CPU — más lento pero mucho más compatible.
 #[tauri::command]
-pub fn restart_llama_server_cpu_only(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+pub async fn restart_llama_server_cpu_only(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || restart_llama_server_cpu_only_inner(&app))
+        .await
+        .map_err(|e| format!("Local AI CPU restart task failed: {e}"))?
+}
+
+fn restart_llama_server_cpu_only_inner(
+    app: &tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let _startup_guard = SERVER_STARTUP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    emit_startup_progress(app, "preparing", "CPU", 1, 1);
     let _ = stop_server();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1650,8 +1770,9 @@ pub fn restart_llama_server_cpu_only(app: tauri::AppHandle) -> Result<serde_json
         return Err("Could not clear managed server slot; try restarting FlowSight.".to_string());
     }
 
-    let child = spawn_llama_managed_child(&app, 0, None)?;
+    let child = spawn_llama_managed_child(app, 0, None)?;
     *guard = Some(child);
+    emit_startup_progress(app, "loading", "CPU", 1, 1);
     Ok(serde_json::json!({
         "status": "started",
         "pid": "managed",
@@ -1888,6 +2009,20 @@ mod agent_struct_tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["activity_type"], "coding");
+    }
+
+    #[test]
+    fn log_tail_counts_unicode_characters_without_panicking() {
+        assert_eq!(tail_chars("GPU ⚠️ falló 🧠", 4), "ló 🧠");
+        assert_eq!(tail_chars("é", 1), "é");
+        assert_eq!(tail_chars("é", 0), "");
+        assert_eq!(tail_chars("é", 10), "é");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ubuntu_auto_startup_tries_cpu_runtime_after_one_gpu_attempt() {
+        assert_eq!(auto_startup_attempts(), vec![(None, 24), (None, 0)]);
     }
 }
 
