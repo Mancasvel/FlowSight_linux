@@ -1,5 +1,5 @@
-# Compila el crate Tauri del agente en los tres SO; detecta roturas por cfg!/target_os antes del release.
-name: Agent — cargo check (all OS)
+# This fork ships the Linux desktop app. Windows and macOS use their dedicated repositories.
+name: Agent — cargo check (Linux)
 
 on:
   push:
@@ -23,10 +23,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            rust: stable
-          - os: windows-latest
-            rust: stable
-          - os: macos-latest
             rust: stable
 
     runs-on: ${{ matrix.os }}

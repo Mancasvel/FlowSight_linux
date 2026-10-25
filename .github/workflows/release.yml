@@ -88,7 +88,10 @@ jobs:
             patchelf \
             gstreamer1.0-tools \
             gstreamer1.0-pipewire \
-            libpipewire-0.3-0
+            libpipewire-0.3-0 \
+            libdbus-1-dev \
+            gnome-keyring \
+            dbus-x11
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -112,7 +115,10 @@ jobs:
       - name: Verify native algorithms before packaging
         run: |
           cargo fmt --manifest-path apps/agent/src-tauri/Cargo.toml --all -- --check
-          cargo test --manifest-path apps/agent/src-tauri/Cargo.toml --lib
+          dbus-run-session -- bash -euc '
+            printf "flowsight-ci-test-only\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --manifest-path apps/agent/src-tauri/Cargo.toml --lib
+          '
           cargo clippy --manifest-path apps/agent/src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Linux packages (pnpm monorepo)

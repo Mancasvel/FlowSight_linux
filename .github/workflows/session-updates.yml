@@ -47,7 +47,11 @@ jobs:
         run: cargo clippy --locked --all-targets
       - name: Rust library tests
         working-directory: apps/agent/src-tauri
-        run: cargo test --locked --lib
+        run: |
+          dbus-run-session -- bash -euc '
+            printf "flowsight-ci-test-only\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --lib
+          '
       - name: Native Secret Service persistence
         working-directory: apps/agent/src-tauri
         run: |
