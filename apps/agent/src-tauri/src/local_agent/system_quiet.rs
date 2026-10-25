@@ -32,6 +32,16 @@ pub fn mocked_banners() -> Option<u32> {
     TEST_BANNERS.get().flatten()
 }
 
+/// The production capability follows the native backend. A test device exercises
+/// the same ownership and recovery logic on every platform without changing OS settings.
+pub fn available() -> bool {
+    #[cfg(test)]
+    if TEST_BANNERS.get().is_some() {
+        return true;
+    }
+    cfg!(windows)
+}
+
 #[cfg(windows)]
 fn reg(args: &[&str]) -> Result<std::process::Output, String> {
     std::process::Command::new("reg.exe")
@@ -92,11 +102,21 @@ fn write_banner_setting(value: Option<u32>) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn read_banner_setting() -> Result<Option<u32>, String> {
+    #[cfg(test)]
+    if let Some(value) = TEST_BANNERS.get() {
+        return Ok(value);
+    }
     Err("System notification control is available on Windows only.".into())
 }
 
 #[cfg(not(windows))]
-fn write_banner_setting(_: Option<u32>) -> Result<(), String> {
+fn write_banner_setting(value: Option<u32>) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_BANNERS.get().is_some() {
+        TEST_BANNERS.set(Some(value));
+        return Ok(());
+    }
+    let _ = value;
     Err("System notification control is available on Windows only.".into())
 }
 

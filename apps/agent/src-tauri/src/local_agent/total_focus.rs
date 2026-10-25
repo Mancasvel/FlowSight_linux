@@ -167,7 +167,7 @@ pub fn get_total_focus() -> Result<Value, String> {
     Ok(
         json!({"preferences":data.total_focus_preferences,"session":data.total_focus.as_ref().filter(|session| session.is_active() || session.paused_at.is_some()),
         "browser":browser_bridge::focus_status(),"messagingAvailable":false,
-        "systemNotificationsAvailable":cfg!(windows),"systemNotificationsQuiet":system_quiet::total_focus_confirmed(),
+        "systemNotificationsAvailable":system_quiet::available(),"systemNotificationsQuiet":system_quiet::total_focus_confirmed(),
         "digest":if state::holding_notifications(&data) { Vec::new() } else { data.notification_digest }}),
     )
 }
@@ -253,7 +253,7 @@ fn activate_with(
         data.total_focus = Some(session.clone());
         Ok(())
     })?;
-    if cfg!(windows) && session.quiet_notifications {
+    if system_quiet::available() && session.quiet_notifications {
         if let Err(error) = system_quiet::enable_total_focus(preferences.duration_minutes.into()) {
             clear_session(Some(&session.id))?;
             release_notifications()?;
@@ -445,7 +445,7 @@ fn resume_with(
         Ok(())
     })?;
     let result = (|| {
-        if cfg!(windows) && resumed.quiet_notifications {
+        if system_quiet::available() && resumed.quiet_notifications {
             system_quiet::enable_total_focus((previous.remaining_seconds + 59) / 60)?;
         }
         let value = apply(&previous)?;
@@ -646,7 +646,7 @@ pub fn dismiss_total_focus_digest(ids: Vec<String>) -> Result<(), String> {
 pub fn restore_after_restart() -> Result<(), String> {
     maintain()?;
     if let Some(session) = policy()? {
-        if cfg!(windows) && session.quiet_notifications {
+        if system_quiet::available() && session.quiet_notifications {
             let until = chrono::DateTime::parse_from_rfc3339(&session.expires_at)
                 .map_err(|error| error.to_string())?;
             let remaining = ((until.with_timezone(&Utc) - Utc::now()).num_seconds() + 59) / 60;

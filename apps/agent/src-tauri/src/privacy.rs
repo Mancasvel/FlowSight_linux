@@ -324,6 +324,8 @@ pub fn enforce_local_retention(db_path: &Path) -> Result<usize, String> {
     )
     .map_err(|error| error.to_string())?;
     if tracking_table_exists(&conn)? {
+        // Preserve minimal earned counters and this week's marks before raw time expires.
+        crate::daily_flow::reconcile_progress(&conn, Local::now().date_naive())?;
         conn.execute(
             "DELETE FROM tracking_daily_time WHERE date < date('now', 'localtime', ?1)",
             params![modifier],
