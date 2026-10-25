@@ -3861,6 +3861,8 @@
 
       <!-- TAB: Summary -->
       <div id="tabSummary" class="tab-panel">
+        <details class="daily-flow" id="dailyFlow" aria-label="Daily Flow" data-reading-key="daily-flow"></details>
+        <p id="dailyFlowAnnouncement" class="daily-flow-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
         <div id="summaryBody">
           <div class="empty-state"><span class="loading"></span> Loading summary...</div>
         </div>
@@ -3943,6 +3945,11 @@
           </select>
           <p class="privacy-detail profile-field-note">Language changes immediately. Your current tracking session and drafts stay open.</p>
           <p id="languageStatus" class="profile-form-status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="card" id="dailyFlowSettings">
+          <div class="card-header"><div class="card-title">Daily Flow</div></div>
+          <label class="checkbox-wrapper" for="dailyFlowVisible"><input type="checkbox" class="checkbox" id="dailyFlowVisible" checked><span class="checkbox-label">Show Daily Flow and personal milestones</span></label>
+          <p class="privacy-detail profile-field-note">A daily win takes 15 recorded minutes. Aim for 3 days a week. Progress stays on this device and is erased with your local data.</p>
         </div>
         <div class="card" id="profileAccountCard">
           <div class="card-header">
@@ -4438,6 +4445,7 @@
     import { loadTimerPreferences, saveTimerPreferences, PomodoroTimer } from './timer-modes.mjs';
     import { mountEsp32Companion } from './esp32-companion.mjs';
     import { mountDailyFlow } from './daily-flow-ui.mjs';
+    import './daily-flow.css';
     import { mountOnlineLeagues } from './online-leagues-ui.mjs';
     import { mountBuildInPublic } from './build-in-public.mjs';
     import {
@@ -5765,6 +5773,13 @@
       }
       return streak;
     }
+
+    const dailyFlow = mountDailyFlow({
+      root: document.getElementById('dailyFlow'),
+      preference: document.getElementById('dailyFlowVisible'),
+      statusElement: document.getElementById('dailyFlowAnnouncement'),
+      invoke,
+    });
 
     const onlineLeagues = mountOnlineLeagues({root: document.getElementById('onlineLeaguesPanel'), invoke: (command, args) => {
       if (!currentUsageProfile.capabilities.online) {

@@ -54,6 +54,7 @@ jobs:
       - name: Production UI profile and online scenarios
         env:
           FLOWSIGHT_USAGE_EVIDENCE: ${{ runner.temp }}/flowsight-evidence/profiles
+          FLOWSIGHT_RENDERER_URL: http://127.0.0.1:1420
         run: |
           pnpm --filter @flowsight/agent vite preview --host 127.0.0.1 --port 1420 > "$RUNNER_TEMP/flowsight-preview.log" 2>&1 &
           python - <<'PY'

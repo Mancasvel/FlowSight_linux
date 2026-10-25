@@ -28,6 +28,7 @@ mod llama_windows_job;
 mod local_agent;
 pub mod mcp;
 mod model_assets;
+mod notion;
 mod oauth_env;
 mod online_leagues;
 pub mod paths;

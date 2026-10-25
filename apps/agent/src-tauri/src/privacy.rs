@@ -677,7 +677,7 @@ fn remove_runtime_artifacts(app: &tauri::AppHandle) -> Vec<String> {
     warnings
 }
 
-fn erase_local_database(conn: &Connection) -> Result<(), String> {
+pub(crate) fn erase_local_database(conn: &Connection) -> Result<(), String> {
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| error.to_string())?;
