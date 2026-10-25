@@ -1,0 +1,84 @@
+name: Linux product checks
+
+on:
+  push:
+    branches: [main, feat/individual-and-visual-reports]
+  pull_request:
+
+concurrency:
+  group: linux-product-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  product:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Native Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config patchelf gstreamer1.0-tools gstreamer1.0-pipewire libpipewire-0.3-0 dbus-x11 gnome-keyring
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent/src-tauri -> target
+      - name: Install renderer dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare compile-only model resources
+        run: node scripts/prepare-ci-resource-stubs.mjs
+      - name: Compile Linux application and tests
+        run: cargo check --locked --manifest-path apps/agent/src-tauri/Cargo.toml --all-targets
+      - name: Native profiles, captures, reports, and online tests
+        run: |
+          dbus-run-session -- bash -euc '
+            printf "flowsight-ci-test-only\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --manifest-path apps/agent/src-tauri/Cargo.toml --lib
+          '
+      - name: Renderer and extension tests
+        run: |
+          pnpm --filter @flowsight/agent test:renderer
+          node --test apps/agent/browser-extension/*.test.mjs
+      - name: Build production renderer
+        run: pnpm --filter @flowsight/agent vite build
+      - name: Install browser test runtime
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Production UI profile and online scenarios
+        env:
+          FLOWSIGHT_USAGE_EVIDENCE: ${{ runner.temp }}/flowsight-evidence/profiles
+        run: |
+          pnpm --filter @flowsight/agent vite preview --host 127.0.0.1 --port 1420 > "$RUNNER_TEMP/flowsight-preview.log" 2>&1 &
+          python - <<'PY'
+          import time, urllib.request
+          for attempt in range(60):
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:1420', timeout=1)
+                  break
+              except OSError:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit('Production renderer did not start')
+          PY
+          node scripts/verify-usage-profiles.mjs
+          node scripts/verify-online-ui.mjs
+      - name: Export three-page reports through the production UI
+        env:
+          FLOWSIGHT_RENDERER_DIST: apps/agent/dist
+          FLOWSIGHT_REPORT_EVIDENCE: ${{ runner.temp }}/flowsight-evidence/report-export
+        run: node scripts/verify-report-export.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-product-evidence
+          path: |
+            ${{ runner.temp }}/flowsight-evidence
+            .impeccable/review/online
+            ${{ runner.temp }}/flowsight-preview.log

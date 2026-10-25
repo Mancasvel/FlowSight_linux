@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "FlowSight Agent",
-  "version": "5.0.18",
+  "version": "6.5.3",
   "identifier": "ai.flowsight.agent",
   "build": {
     "frontendDist": "../dist",
@@ -30,7 +30,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": [
+      "deb",
+      "appimage"
+    ],
     "linux": {
       "deb": {
         "depends": [
@@ -67,7 +70,8 @@
       "../browser-extension/focus.css": "browser-extension/focus.css",
       "../browser-extension/icon16.png": "browser-extension/icon16.png",
       "../browser-extension/icon48.png": "browser-extension/icon48.png",
-      "../browser-extension/icon128.png": "browser-extension/icon128.png"
+      "../browser-extension/icon128.png": "browser-extension/icon128.png",
+      "../browser-extension/music.js": "browser-extension/music.js"
     }
   }
 }

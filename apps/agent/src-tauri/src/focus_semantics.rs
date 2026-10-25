@@ -169,8 +169,6 @@ pub fn canonicalize_category(value: &str) -> String {
     }
 }
 
-// Linux keeps its current prompt; this shared helper is covered by unit tests.
-#[cfg(test)]
 pub fn allowed_categories_prompt() -> String {
     CATEGORY_POLICIES
         .iter()
@@ -831,6 +829,12 @@ fn foreground_action_evidence(sample: &ActivitySample) -> String {
 }
 
 fn obvious_work_context(sample: &ActivitySample) -> bool {
+    if crate::agent_pure::eclipse_work_window(
+        sample.app_name.as_deref(),
+        sample.window_title.as_deref(),
+    ) {
+        return true;
+    }
     let evidence = foreground_action_evidence(sample);
     [
         "audio production",
@@ -1760,6 +1764,12 @@ fn load_samples_from_db(
         .filter_map(|row| row.ok())
         .flat_map(
             |(observed_end, duration_seconds, category, description, ticket, app, title, theme)| {
+                let category = crate::agent_pure::resolve_activity_category(
+                    &category,
+                    &description,
+                    app.as_deref(),
+                    title.as_deref(),
+                );
                 window
                     .slices_for_observation(&observed_end, duration_seconds)
                     .into_iter()
@@ -2683,6 +2693,47 @@ mod tests {
         assert_eq!(out.deep_focus_seconds, 1800);
         assert_eq!(out.explicit_theme_coverage_pct, 100.0);
         assert_eq!(out.sessions[0].category_mix.len(), 2);
+    }
+
+    #[test]
+    fn historic_eclipse_work_is_focus_without_rewriting_the_stored_observation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE reports (
+                created_at TEXT NOT NULL, activity_type TEXT NOT NULL,
+                description TEXT NOT NULL, jira_ticket_id TEXT,
+                duration_seconds INTEGER NOT NULL, active_app TEXT,
+                window_title TEXT, theme_hint TEXT
+            );
+            INSERT INTO reports VALUES
+                ('2026-08-22 09:15:00', 'Browsing', 'Editing controls', NULL, 900, 'eclipse.exe', 'workspace - Main.java - Eclipse IDE', NULL),
+                ('2026-08-22 09:30:00', 'General', 'Interacting with a panel', NULL, 900, 'Eclipse', 'workspace - Main.java - Eclipse IDE', NULL),
+                ('2026-08-22 09:32:00', 'Browsing', 'FOREGROUND DESTINATION: Instagram', NULL, 120, 'Chrome', 'Instagram', NULL);",
+        ).unwrap();
+        let summary = summarize_from_db(&conn, "2026-08-21", "2026-08-23").unwrap();
+        assert_eq!(summary.focus_eligible_seconds, 1800);
+        assert_eq!(summary.deep_focus_seconds, 1800);
+        assert_eq!(summary.deep_focus_sessions, 1);
+        assert_eq!(summary.distraction_seconds, 120);
+        let apps = distraction_apps_from_db(&conn, "2026-08-21", "2026-08-23", &[]).unwrap();
+        assert_eq!(apps.qualifying_seconds, 120);
+        assert!(apps
+            .apps
+            .iter()
+            .all(|row| !row.app_name.to_lowercase().contains("eclipse")));
+        assert!(apps
+            .detours
+            .iter()
+            .all(|row| !row.label.to_lowercase().contains("eclipse")));
+        assert_eq!(
+            conn.query_row(
+                "SELECT activity_type FROM reports ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "Browsing",
+        );
     }
 
     #[test]
