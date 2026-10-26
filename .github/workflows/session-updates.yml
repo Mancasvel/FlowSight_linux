@@ -56,7 +56,7 @@ jobs:
         working-directory: apps/agent/src-tauri
         run: |
           dbus-run-session -- bash -euc '
-            printf "ci-test-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+            printf "flowsight-ci-test-only\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --locked --lib secure_config::tests::native_secret_service_roundtrip -- --ignored
           '
       - name: Install renderer dependencies
