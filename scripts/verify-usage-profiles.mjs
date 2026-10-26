@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { chromium } from 'playwright';
+import { chromium, webkit } from 'playwright';
 
 const source = await readFile(new URL('./verify-recorded-time.mjs', import.meta.url), 'utf8');
 const start = source.indexOf('await page.addInitScript(') + 'await page.addInitScript('.length;
@@ -10,12 +10,16 @@ const end = source.indexOf('}, { locale });', start) + 1;
 const initialize = source.slice(start, end);
 const output = resolve(process.env.FLOWSIGHT_USAGE_EVIDENCE || '../team-profiles/verification');
 await mkdir(output, { recursive: true });
-const browser = await chromium.launch({ headless: true });
+const browserType = process.env.FLOWSIGHT_E2E_BROWSER === 'webkit' ? webkit : chromium;
+const browser = await browserType.launch({ headless: true });
+let currentPage;
 const results = [];
 const scenario = name => !process.env.FLOWSIGHT_USAGE_SCENARIO || process.env.FLOWSIGHT_USAGE_SCENARIO === name;
 
 async function pageFor({ profile = 'team_employee', locale = 'en-GB', completed = true, signedIn = true, licensed = true, usageChoice = null, solo = false, stale = false, legacy = false, offline = false, pomodoro = false, dark = false, holdBoot = false } = {}) {
   const page = await browser.newPage({ locale, timezoneId: 'Europe/Madrid', colorScheme: dark ? 'dark' : 'light', viewport: { width: 370, height: 700 }, reducedMotion: 'reduce' });
+  currentPage = page;
+  page.setDefaultTimeout(30_000);
   await page.clock.install({ time: new Date('2026-10-01T17:00:00+02:00') });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript({ content: `(${initialize})({locale:${JSON.stringify(locale)}});` });
@@ -165,10 +169,30 @@ try {
     assert.equal(await page.locator('#onboardingStepLabel').isVisible(), false);
     assert.equal(await page.locator('#teamSetupShare').isChecked(), false);
     assert.equal(await page.evaluate(() => window.testCalls.filter(call => call.command === 'start_monitoring').length), 0);
+    const privacyFocus = [];
+    const snapshotFocus = async phase => {
+      const state = await page.evaluate(() => {
+        const active = document.activeElement, launcher = document.getElementById('teamSetupPrivacy');
+        return { activeId: active.id, activeTag: active.tagName, documentFocused: document.hasFocus(),
+          activeDialog: active.closest('#privacyNoticeOverlay,#onboardingOverlay,#loginScreen,#usageChoiceOverlay')?.id || null,
+          activeInert: Boolean(active.closest('[inert]')), launcherInert: Boolean(launcher.closest('[inert]')),
+          launcherVisible: launcher.getClientRects().length > 0, privacyVisible: document.getElementById('privacyNoticeOverlay').classList.contains('visible') };
+      });
+      privacyFocus.push({ phase, ...state });
+    };
+    await snapshotFocus('before-click');
     await page.locator('#teamSetupPrivacy').click(); await page.locator('#privacyNoticeOverlay.visible').waitFor();
+    await snapshotFocus('after-open');
     await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(() => document.getElementById('privacyNoticeOverlay').contains(document.activeElement)), true);
-    await page.keyboard.press('Escape'); assert.equal(await page.evaluate(() => document.activeElement.id), 'teamSetupPrivacy');
+    await page.keyboard.press('Escape');
+    const immediateFocus = await page.evaluate(() => document.activeElement.id);
+    await snapshotFocus('after-escape');
+    await page.clock.runFor(50); await snapshotFocus('after-clock-tick');
+    await writeFile(resolve(output, 'team-first-focus-synthetic.json'), JSON.stringify(privacyFocus, null, 2));
+    await page.screenshot({ path: resolve(output, 'team-first-focus-after-escape-synthetic.png') });
+    console.log('Nested privacy focus:', JSON.stringify(privacyFocus));
+    assert.equal(immediateFocus, 'teamSetupPrivacy');
     await page.locator('#onboardingContinueBtn').click(); await page.locator('#onboardingOverlay').waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => window.usageFixture.privacy.monitoringNoticeAcknowledged), true);
     assert.equal(await page.evaluate(() => window.usageFixture.privacy.cloudSyncEnabled), false);
@@ -355,4 +379,15 @@ try {
   }
   await writeFile(resolve(output, 'renderer-e2e.json'), JSON.stringify({ evidence: 'Production renderer with fictional native IPC, no real account or native capture', results }, null, 2));
   console.log(JSON.stringify(results, null, 2));
+} catch(error) {
+  if(currentPage&&!currentPage.isClosed()) {
+    await currentPage.screenshot({path:resolve(output,'failure-simulated-native.png'),timeout:10000}).catch(()=>{});
+    console.error('Profile failure focus:',await currentPage.evaluate(()=>({
+      activeId:document.activeElement?.id,activeTag:document.activeElement?.tagName,
+      inertAncestor:document.activeElement?.closest('[inert]')?.id,
+      privacyVisible:document.getElementById('privacyNoticeOverlay')?.classList.contains('visible'),
+      setupVisible:document.getElementById('onboardingOverlay')?.classList.contains('visible'),
+    })).catch(()=>null));
+  }
+  throw error;
 } finally { await browser.close(); }

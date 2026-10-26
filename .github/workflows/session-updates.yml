@@ -75,6 +75,7 @@ jobs:
       - name: Install browser for renderer checks
         run: corepack pnpm exec playwright install --with-deps chromium
       - name: Session and onboarding renderer verification
+        timeout-minutes: 15
         env:
           FLOWSIGHT_RENDERER_URL: http://127.0.0.1:1436
         run: |
@@ -86,14 +87,14 @@ jobs:
             sleep 1
           done
           curl --silent --fail "$FLOWSIGHT_RENDERER_URL" > /dev/null
-          node scripts/verify-adda-renderer.mjs
-          node scripts/verify-session-onboarding.mjs
-          node scripts/verify-recorded-time.mjs
-          node scripts/verify-total-focus-extension.mjs
-          node scripts/verify-localization.mjs
-          node scripts/verify-coach-conversation.mjs
-          node scripts/verify-linked-session.mjs
-          node scripts/verify-local-ai-loading.mjs
+          node scripts/run-browser-check.mjs scripts/verify-adda-renderer.mjs
+          node scripts/run-browser-check.mjs scripts/verify-session-onboarding.mjs
+          node scripts/run-browser-check.mjs scripts/verify-recorded-time.mjs
+          node scripts/run-browser-check.mjs scripts/verify-total-focus-extension.mjs
+          node scripts/run-browser-check.mjs scripts/verify-localization.mjs
+          node scripts/run-browser-check.mjs scripts/verify-coach-conversation.mjs
+          node scripts/run-browser-check.mjs scripts/verify-linked-session.mjs
+          node scripts/run-browser-check.mjs scripts/verify-local-ai-loading.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

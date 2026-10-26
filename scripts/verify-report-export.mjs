@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
-import { chromium } from 'playwright';
+import { chromium, webkit } from 'playwright';
 import { syntheticWorkReport, installSyntheticWorkReportNative } from './fixtures/work-report.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -79,7 +79,8 @@ function pdfPages(bytes) {
 }
 
 try {
-  browser = await chromium.launch({ headless: true });
+  const browserType = process.env.FLOWSIGHT_E2E_BROWSER === 'webkit' ? webkit : chromium;
+  browser = await browserType.launch({ headless: true });
   for (const view of [
     { name: 'wide-en', width: 900, height: 1000, language: 'en', theme: 'light' },
     { name: 'compact-es', width: 370, height: 900, language: 'es', theme: 'light' },

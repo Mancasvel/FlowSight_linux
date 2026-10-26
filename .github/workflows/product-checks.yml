@@ -12,6 +12,7 @@ concurrency:
 jobs:
   product:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -54,11 +55,12 @@ jobs:
       - name: Build production renderer
         run: pnpm --filter @flowsight/agent vite build
       - name: Install browser test runtime
-        run: pnpm exec playwright install --with-deps chromium
-      - name: Production UI profile and online scenarios
+        run: pnpm exec playwright install --with-deps chromium webkit
+      - name: Production UI profiles, Online and CSP reports in Chromium and WebKit GTK
+        timeout-minutes: 15
         env:
-          FLOWSIGHT_USAGE_EVIDENCE: ${{ runner.temp }}/flowsight-evidence/profiles
           FLOWSIGHT_RENDERER_URL: http://127.0.0.1:1420
+          FLOWSIGHT_BROWSER_CHECK_TIMEOUT_MS: 240000
         run: |
           pnpm --filter @flowsight/agent vite preview --host 127.0.0.1 --port 1420 > "$RUNNER_TEMP/flowsight-preview.log" 2>&1 &
           python - <<'PY'
@@ -72,19 +74,22 @@ jobs:
           else:
               raise SystemExit('Production renderer did not start')
           PY
-          node scripts/verify-usage-profiles.mjs
-          node scripts/verify-online-ui.mjs
-          node scripts/verify-focus-platform.mjs
-      - name: Export three-page reports through the production UI
-        env:
-          FLOWSIGHT_RENDERER_DIST: apps/agent/dist
-          FLOWSIGHT_REPORT_EVIDENCE: ${{ runner.temp }}/flowsight-evidence/report-export
-        run: node scripts/verify-report-export.mjs
+          failed=0
+          for browser in chromium webkit; do
+            export FLOWSIGHT_E2E_BROWSER="$browser"
+            export FLOWSIGHT_USAGE_EVIDENCE="$RUNNER_TEMP/flowsight-evidence/$browser/profiles"
+            export FLOWSIGHT_REPORT_EVIDENCE="$RUNNER_TEMP/flowsight-evidence/$browser/report-export"
+            for script in verify-usage-profiles.mjs verify-online-ui.mjs verify-focus-platform.mjs verify-report-export.mjs; do
+              if ! node scripts/run-browser-check.mjs "scripts/$script"; then failed=1; fi
+            done
+          done
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: linux-product-evidence
           path: |
             ${{ runner.temp }}/flowsight-evidence
-            .impeccable/review/online
+            .impeccable/review/online-*
+            .impeccable/review/focus-platform-*
             ${{ runner.temp }}/flowsight-preview.log
