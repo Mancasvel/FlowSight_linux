@@ -21,11 +21,11 @@
     "@tauri-apps/plugin-dialog": "2.7.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.12.0",
-    "jspdf": "^4.1.0"
+    "jspdf": "^4.2.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.10.1",
     "dotenv": "^17.2.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.7"
   }
 }

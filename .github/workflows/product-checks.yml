@@ -2,7 +2,7 @@ name: Linux product checks
 
 on:
   push:
-    branches: [main, feat/individual-and-visual-reports]
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -74,6 +74,7 @@ jobs:
           PY
           node scripts/verify-usage-profiles.mjs
           node scripts/verify-online-ui.mjs
+          node scripts/verify-focus-platform.mjs
       - name: Export three-page reports through the production UI
         env:
           FLOWSIGHT_RENDERER_DIST: apps/agent/dist

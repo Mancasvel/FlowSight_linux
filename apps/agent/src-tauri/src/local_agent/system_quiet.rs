@@ -14,7 +14,9 @@ static CONTROL: Mutex<()> = Mutex::new(());
 const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings";
 #[cfg(windows)]
 const VALUE: &str = "NOC_GLOBAL_SETTING_TOASTS_ENABLED";
+#[cfg(windows)]
 const POLICY_KEY: &str = r"Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications";
+#[cfg(windows)]
 const POLICY_VALUE: &str = "NoToastApplicationNotification";
 
 #[cfg(test)]

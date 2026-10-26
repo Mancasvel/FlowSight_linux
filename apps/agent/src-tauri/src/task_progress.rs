@@ -130,6 +130,7 @@ pub(crate) struct ProgressTracker {
 }
 
 impl ProgressTracker {
+    #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         self.baseline = None;
     }
