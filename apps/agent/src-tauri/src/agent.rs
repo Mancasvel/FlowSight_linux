@@ -1,5 +1,5 @@
 use crate::agent_pure::{parse_analysis, resolve_persisted_category};
-use crate::focus_semantics::{canonical_ticket_value, LocalDateWindow};
+use crate::focus_semantics::{allowed_categories_prompt, canonical_ticket_value, LocalDateWindow};
 use crate::vision_model::{CONFIG_VISION_MODEL_ID, LLAMA_CHAT_MODEL_ID, VISION_STATUS_LABEL};
 use chrono::{Datelike, Local};
 use rusqlite::{params, Connection};
@@ -88,6 +88,9 @@ impl FlowSightAgent {
             agent.tracking_clock = load_tracking_clock(&conn).ok();
         }
         agent.load_config();
+        if crate::paths::isolated_pilot_dir().is_some() {
+            return agent;
+        }
         crate::focus_alerts::set_enabled(crate::desktop_presence::focus_alerts_enabled());
 
         if let Err(error) = crate::privacy::enforce_local_retention(&agent.db_path) {
@@ -135,8 +138,23 @@ impl FlowSightAgent {
                     "ALTER TABLE reports ADD COLUMN duration_seconds INTEGER DEFAULT 30",
                     [],
                 );
+                // Additive, local-only provenance for the canonical focus detector.
+                // Existing databases remain valid; old rows simply have NULL context.
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN active_app TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN window_title TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN capture_source TEXT", []);
+                let _ = conn.execute("ALTER TABLE reports ADD COLUMN theme_hint TEXT", []);
+                if let Err(error) = crate::task_progress::ensure_schema(&conn) {
+                    log::error!("[TaskProgress] SQLite progress schema failed: {error}");
+                }
                 if let Err(error) = conn.execute_batch(crate::sync_pure::PENDING_REPORT_INDEX_SQL) {
                     log::warn!("[Agent] Could not index pending reports: {error}");
+                }
+                if let Err(error) = crate::privacy::ensure_schema(&conn) {
+                    log::error!("[Privacy] SQLite privacy schema failed: {error}");
+                }
+                if let Err(error) = crate::sync::ensure_capture_schema(&conn) {
+                    log::error!("[Sync] Capture ownership schema failed: {error}");
                 }
             }
             Err(e) => log::error!(
@@ -303,6 +321,20 @@ pub struct ContextSnapshot {
     pub category: String, // NEW
     pub analysis_failed: bool,
     pub metadata: SnapshotMetadata,
+    #[serde(skip)]
+    pub(crate) observed_at_utc: Option<String>,
+    #[serde(skip)]
+    pub(crate) observed_at: Option<std::time::Instant>,
+    #[serde(skip)]
+    pub(crate) window_title: Option<String>,
+    #[serde(skip)]
+    pub(crate) fingerprint: Option<crate::task_progress::VisualFingerprint>,
+    #[serde(skip)]
+    pub(crate) engagement: Option<crate::task_progress::Engagement>,
+    #[serde(skip)]
+    pub(crate) online_owner: Option<String>,
+    #[serde(skip)]
+    pub(crate) cloud_owner: Option<crate::sync::CloudCaptureOwner>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -323,6 +355,11 @@ pub async fn capture_context_snapshot(
 ) -> Result<ContextSnapshot, String> {
     crate::telemetry::record_selected_task(jira_ticket.as_deref().or(user_task.as_deref()));
     let foreground = crate::context::get_system_context();
+    let observed_at = std::time::Instant::now();
+    let observed_at_utc = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let db_path = crate::paths::db_path()?;
+    let online_owner = crate::online_leagues::capture_owner(&db_path);
+    let cloud_owner = crate::sync::cloud_capture_owner(&db_path);
     if let Ok(path) = crate::paths::db_path() {
         if crate::privacy::application_is_excluded(&path, foreground.app_name.as_deref()) {
             crate::focus_alerts::excluded_app_entered();
@@ -356,7 +393,7 @@ pub async fn capture_context_snapshot(
 
     // Vision + sync fallbacks on a worker thread; portal must stay on the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
-        use crate::context::get_system_context;
+        use base64::Engine;
         use std::path::PathBuf;
 
         #[cfg(target_os = "linux")]
@@ -394,11 +431,23 @@ pub async fn capture_context_snapshot(
                     branch: None,
                     language: None,
                 },
+                observed_at_utc: None,
+                observed_at: None,
+                window_title: None,
+                fingerprint: None,
+                engagement: None,
+                online_owner: None,
+                cloud_owner: None,
             });
         } else {
             capture_screen()?
         };
         let path = PathBuf::from(&path_str);
+        let fingerprint = base64::engine::general_purpose::STANDARD
+            .decode(&base64)
+            .ok()
+            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+            .map(|frame| crate::task_progress::VisualFingerprint::from_image(&frame));
 
         // 2. Local vision analysis (visual description + category)
         let task_context = jira_ticket
@@ -433,7 +482,13 @@ pub async fn capture_context_snapshot(
         };
 
         // Parse category from response
-        let (description, category) = parse_analysis(&raw_analysis.0);
+        let (description, model_category) = parse_analysis(&raw_analysis.0);
+        let category = crate::agent_pure::correct_category_with_window(
+            &model_category,
+            foreground.app_name.as_deref(),
+            foreground.window_title.as_deref(),
+        );
+        let engagement = crate::task_progress::Engagement::from_analysis(&raw_analysis.0);
         let analysis_failed =
             raw_analysis.1 || description.eq_ignore_ascii_case("No analysis available");
 
@@ -448,7 +503,7 @@ pub async fn capture_context_snapshot(
         }
 
         // 3. System Context (Window/App)
-        let sys = get_system_context();
+        let sys = foreground;
 
         // 4. Git Context (Project)
         // Antes: hardcodeaba ~/Desktop/FlowSight.AI (solo exist\u00eda en la m\u00e1quina
@@ -467,6 +522,15 @@ pub async fn capture_context_snapshot(
             description,
             category,
             analysis_failed,
+            observed_at_utc: Some(observed_at_utc),
+            observed_at: Some(observed_at),
+            window_title: crate::privacy::store_window_titles(&db_path)
+                .then_some(sys.window_title)
+                .flatten(),
+            fingerprint,
+            engagement: Some(engagement),
+            online_owner,
+            cloud_owner,
             metadata: SnapshotMetadata {
                 task: jira_ticket.or(user_task),
                 file: sys.file_name,
@@ -577,6 +641,11 @@ pub fn initialize_agent(
     }
 
     *g = Some(FlowSightAgent::new());
+    if crate::paths::isolated_pilot_dir().is_none() {
+        if let Some(agent) = g.as_ref() {
+            crate::online_leagues::start_sync_thread(agent.db_path.clone(), app_handle.clone());
+        }
+    }
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(15));
         use tauri::Manager;
@@ -646,6 +715,15 @@ pub fn get_tracking_clock(
         .as_mut()
         .unwrap()
         .snapshot(&conn, agent.is_running)
+}
+
+#[tauri::command]
+pub fn get_daily_flow_progress(
+    state: State<'_, AgentState>,
+) -> Result<crate::daily_flow::DailyFlowProgress, String> {
+    let snapshot = get_tracking_clock(state)?;
+    let conn = Connection::open(crate::paths::db_path()?).map_err(|e| e.to_string())?;
+    crate::daily_flow::load_progress(&conn, snapshot)
 }
 
 #[tauri::command]
@@ -1869,11 +1947,37 @@ VISIBLE CONTENT: [1–2 short sentences: the main artifact on screen and what it
 FILES OR URLS: [up to about five of the most relevant file names, paths, or URLs; otherwise None]
 CURRENT ACTION: [what the user appears to be doing right now, one sentence]
 PROGRESS: [errors, warnings, build/test status if any, or None visible]
+ENGAGEMENT: [exactly one: work, reading, live meeting, playing media, waiting, unknown. Use visible content, not input activity or the application name. A call lobby or ended call is not a live meeting. A static document may be reading; this is a possible context, not proof of attention. Use waiting for a loading/stalled work surface. Never claim task completion or temporal progress from this single frame]
 NEXT STEP: [one short sentence: likely next action]
-CATEGORY: [pick exactly ONE from: Coding, Debugging, CodeReview, Testing, Documentation, Design, Planning, Meeting, Communication, Research, Learning, DevOps, Database, Sales, Admin, Browsing, Idle, General]
+CATEGORY: [pick exactly ONE from: {}]
 
-CATEGORY rules: use Coding ONLY for software development (editing code, debugging in an IDE, repo/PR review in a dev tool, programming-focused terminal). Spreadsheets (Excel/Sheets), email, chat, slides, PDFs, CRM, and generic browsing are NOT Coding unless the visible work is clearly programming.]"#,
-        current_task
+The LAST line MUST be exactly `CATEGORY: <one label from the list>`. Never omit it. Never leave it blank.
+
+CATEGORY rules (follow strictly):
+- Analysis: sustained spreadsheet, data, financial, scientific, business-intelligence, or dashboard analysis.
+- Writing: drafting or substantially editing prose, reports, articles, proposals, or presentations.
+- Design: creating or substantially editing visual, product, architectural, or service designs.
+- Planning: roadmaps, schedules, task organization, prioritization, and project planning.
+- Meeting: a live call, presentation, workshop, or meeting in progress.
+- Communication: email, chat, messages, or asynchronous collaboration.
+- Documentation: producing or maintaining reference material, procedures, or structured internal knowledge.
+- Learning: coursework, tutorials, deliberate study, or skills practice.
+- Sales: CRM, prospecting, proposals, pipeline work, or customer-facing commercial activity.
+- Admin: expenses, forms, routine record keeping, scheduling, finance operations, or access/settings maintenance.
+- Coding: IDEs and AI code editors (Eclipse, Cursor, VS Code, JetBrains, Xcode, Neovim), editing source files, programming terminals (git/cargo/npm), local app development UIs.
+- Debugging: inspecting failures with a debugger, stack trace, logs, or breakpoints.
+- CodeReview: pull requests, diff review, GitHub/GitLab PR pages.
+- Testing: running or inspecting test suites, test results, or quality checks.
+- DevOps: CI/CD, GitHub Actions, release pipelines, Docker/K8s ops.
+- Database: querying, designing, or administering databases and data stores.
+- Research: scholarly or subject-matter sources, market/customer research, reference material, API docs, or documentation consulted to answer a work question (NOT social media).
+- Browsing: ONLY casual/non-work web use (social, news, shopping, YouTube, LinkedIn feed). Safari/Chrome showing GitHub repos, Actions, Releases, or code is NOT Browsing — use Coding, CodeReview, or DevOps.
+- Idle: a lock screen or clearly inactive/blank work surface; never infer this from a lack of keyboard or mouse data.
+- General: use only when the primary work activity is genuinely ambiguous after considering the screenshot and task context.
+- Spreadsheets may be Analysis or Admin depending on the visible task. Documents may be Writing, Documentation, Research, or Admin. Email/chat are Communication. Do not assume knowledge work means software development.
+Never label Eclipse showing a source file/workspace, Cursor, VS Code, or a GitHub engineering page as Browsing or General. Eclipse Java editing is Coding; debugger/breakpoint work is Debugging; running JUnit/test suites is Testing."#,
+        current_task,
+        allowed_categories_prompt()
     );
 
     // Retry up to 2 times on empty/refusal responses
@@ -2077,19 +2181,55 @@ pub(crate) fn save_native_snapshot(
         return Ok(());
     }
     let duration = duration_seconds.clamp(1, 300);
-    let ticket = canonical_ticket_value(snapshot.metadata.task.as_deref());
-    let id = agent
-        .save_report(&snapshot.description, &category, ticket, duration)
-        .ok_or("Could not save native activity")?;
     let conn = Connection::open(&agent.db_path).map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE reports SET active_app=?1,capture_source='linux-native' WHERE id=?2",
-        params![app_name, id],
-    )
-    .map_err(|e| e.to_string())?;
+    static PROGRESS: std::sync::OnceLock<Mutex<crate::task_progress::ProgressTracker>> =
+        std::sync::OnceLock::new();
+    let progress = snapshot
+        .fingerprint
+        .clone()
+        .zip(snapshot.observed_at)
+        .map(|(frame, now)| {
+            let run = generation.to_string();
+            PROGRESS
+                .get_or_init(|| Mutex::new(crate::task_progress::ProgressTracker::default()))
+                .lock()
+                .map_err(|e| e.to_string())
+                .map(|mut tracker| {
+                    tracker.observe(
+                        now,
+                        None,
+                        Duration::from_millis(
+                            agent
+                                .config
+                                .capture_interval
+                                .unwrap_or(60_000)
+                                .clamp(5_000, 300_000)
+                                + 90_000,
+                        ),
+                        &[
+                            Some(&run),
+                            app_name,
+                            snapshot.window_title.as_deref(),
+                            snapshot.metadata.task.as_deref(),
+                        ],
+                        frame,
+                        snapshot
+                            .engagement
+                            .unwrap_or(crate::task_progress::Engagement::Unknown),
+                        duration,
+                    )
+                })
+        })
+        .transpose()?;
+    if persist_native_observation(&conn, snapshot, &category, duration, progress.as_ref())?
+        .is_none()
+    {
+        return Ok(());
+    }
     agent.reports_sent += 1;
     let db_path = agent.db_path.clone();
     drop(guard);
+    crate::online_leagues::request_sync();
     crate::focus_alerts::review_browsing_report(
         app,
         &db_path,
@@ -2099,4 +2239,127 @@ pub(crate) fn save_native_snapshot(
         app_name,
     );
     Ok(())
+}
+
+/// Only the in-process native capture loop supplies the skipped capture fields.
+/// Persist the frame timestamp and account/consent captured before inference.
+fn persist_native_observation(
+    conn: &Connection,
+    snapshot: &ContextSnapshot,
+    category: &str,
+    seconds: u64,
+    progress: Option<&crate::task_progress::ProgressObservation>,
+) -> Result<Option<i64>, String> {
+    let Some(observed_at) = snapshot.observed_at_utc.as_deref() else {
+        return Ok(None);
+    };
+    if snapshot.observed_at.is_none() || snapshot.analysis_failed || seconds == 0 {
+        return Ok(None);
+    }
+    crate::sync::ensure_capture_schema(conn)?;
+    crate::online_leagues::ensure_schema(conn)?;
+    crate::task_progress::ensure_schema(conn).map_err(|e| e.to_string())?;
+    let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let progress = progress
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let changed = transaction.execute(
+        "INSERT INTO reports (description,activity_type,jira_ticket_id,duration_seconds,active_app,window_title,capture_source,theme_hint,created_at,progress_observation)
+         SELECT ?1,?2,?3,?4,?5,?6,'linux-native',?7,?8,?9
+         WHERE NOT EXISTS (SELECT 1 FROM reports WHERE capture_source='linux-native' AND created_at=?8)",
+        params![snapshot.description, category, canonical_ticket_value(snapshot.metadata.task.as_deref()), seconds.min(300), snapshot.metadata.app,
+                snapshot.window_title, snapshot.metadata.task, observed_at, progress],
+    ).map_err(|e|e.to_string())?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    let id = transaction.last_insert_rowid();
+    crate::sync::bind_cloud_observation(&transaction, id, snapshot.cloud_owner.as_ref());
+    crate::online_leagues::bind_observation(&transaction, id, snapshot.online_owner.as_deref());
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(Some(id))
+}
+
+#[cfg(test)]
+mod native_snapshot_tests {
+    use super::*;
+    fn fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT);
+            CREATE TABLE reports(id INTEGER PRIMARY KEY,description TEXT,activity_type TEXT,
+            jira_ticket_id TEXT,duration_seconds INTEGER,active_app TEXT,window_title TEXT,
+            capture_source TEXT,theme_hint TEXT,created_at TEXT,synced INTEGER DEFAULT 0);",
+        )
+        .unwrap();
+        conn
+    }
+    fn snapshot() -> ContextSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "vector":[],"dimension":0,"description":"Java source work","category":"Coding",
+            "analysis_failed":false,"metadata":{"task":null,"file":"Main.java","app":"Eclipse","branch":null,"language":null},
+            "observed_at_utc":"2026-10-01 09:00:00","online_owner":"forged-account"
+        })).unwrap()
+    }
+    #[test]
+    fn serialized_manual_snapshot_cannot_supply_native_time_or_sharing_ownership() {
+        let conn = fixture();
+        let snapshot = snapshot();
+        assert!(snapshot.observed_at_utc.is_none());
+        assert!(snapshot.online_owner.is_none());
+        assert!(
+            persist_native_observation(&conn, &snapshot, "Coding", 60, None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM reports", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn native_frame_keeps_capture_time_and_a_retry_cannot_duplicate_elapsed_time() {
+        let conn = fixture();
+        let mut snapshot = snapshot();
+        snapshot.observed_at_utc = Some("2026-10-01 09:00:00".into());
+        snapshot.observed_at = Some(std::time::Instant::now());
+        snapshot.window_title = Some("workspace - Main.java - Eclipse IDE".into());
+        let id = persist_native_observation(&conn, &snapshot, "Coding", 60, None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            persist_native_observation(&conn, &snapshot, "Coding", 60, None)
+                .unwrap()
+                .is_none()
+        );
+        let observed=conn.query_row("SELECT created_at,duration_seconds,capture_source,active_app,window_title FROM reports WHERE id=?1",[id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))).unwrap();
+        assert_eq!(
+            observed,
+            (
+                "2026-10-01 09:00:00".into(),
+                60,
+                "linux-native".into(),
+                "Eclipse".into(),
+                "workspace - Main.java - Eclipse IDE".into()
+            )
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM online_observation_owner", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT sum(duration_seconds) FROM reports", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            60
+        );
+    }
 }

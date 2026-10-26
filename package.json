@@ -1,6 +1,6 @@
 {
   "name": "flowsight-ai",
-  "version": "5.0.18",
+  "version": "6.5.4",
   "private": true,
   "description": "FlowSight AI - Privacy-first developer activity monitor with local AI",
   "repository": {
@@ -24,5 +24,10 @@
   "devDependencies": {
     "@tauri-apps/cli": "2.10.1",
     "playwright": "1.62.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "ws": "8.21.0"
+    }
   }
 }

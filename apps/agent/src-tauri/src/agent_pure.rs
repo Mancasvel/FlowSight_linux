@@ -23,8 +23,6 @@ pub(crate) fn parse_analysis(raw: &str) -> (String, String) {
 /// describes the content, but a small screenshot model cannot overrule an
 /// unambiguous executable/title prior. Browser alone is intentionally not a
 /// category: its title/content decides Research, engineering, or Browsing.
-// Retain the shared correction helper without enabling it in the Linux pipeline.
-#[allow(dead_code)]
 pub(crate) fn correct_category_with_window(
     category: &str,
     app_name: Option<&str>,
@@ -36,6 +34,9 @@ pub(crate) fn correct_category_with_window(
 
     if combined.contains("lock screen") || combined.contains("windows logon") {
         return "Idle".into();
+    }
+    if weak_activity_category(category) && eclipse_work_window(app_name, window_title) {
+        return infer_engineering_subcategory(&combined);
     }
     if combined.contains("zoom")
         || combined.contains("google meet")
@@ -262,10 +263,7 @@ pub(crate) fn correct_category_with_window(
 
 /// Override weak/wrong labels when the text clearly shows software-engineering work.
 fn correct_misclassified_category(category: &str, lower: &str) -> String {
-    let weak = matches!(
-        category,
-        "Browsing" | "General" | "Idle" | "Admin" | "Communication"
-    );
+    let weak = weak_activity_category(category);
     if weak && looks_like_engineering_work(lower) {
         return infer_engineering_subcategory(lower);
     }
@@ -301,6 +299,12 @@ fn looks_like_research_material(lower: &str) -> bool {
 }
 
 fn looks_like_engineering_work(lower: &str) -> bool {
+    if communication_mentions_another_tool(lower) {
+        return false;
+    }
+    if looks_like_eclipse_work(lower) {
+        return true;
+    }
     const IDE_HINTS: &[&str] = &[
         "cursor",
         "visual studio code",
@@ -359,6 +363,122 @@ fn looks_like_engineering_work(lower: &str) -> bool {
         || lower.contains(".py ")
 }
 
+fn weak_activity_category(category: &str) -> bool {
+    matches!(
+        category,
+        "Browsing" | "General" | "Idle" | "Admin" | "Communication"
+    )
+}
+
+fn eclipse_application(app: Option<&str>) -> bool {
+    let app = app
+        .unwrap_or_default()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        app.trim_end_matches(".exe").trim_end_matches(".app"),
+        "eclipse" | "eclipsec" | "eclipse ide" | "eclipse-ide" | "org.eclipse.platform"
+    )
+}
+
+/// Eclipse must be the foreground application, with an identifiable source
+/// file/workspace. A mention of an eclipse in a browser or a generic welcome
+/// window is not evidence of programming.
+pub(crate) fn eclipse_work_window(app: Option<&str>, title: Option<&str>) -> bool {
+    if !eclipse_application(app) {
+        return false;
+    }
+    let title = title.unwrap_or_default().to_ascii_lowercase();
+    [
+        ".java",
+        ".kt",
+        ".scala",
+        ".c -",
+        ".cpp",
+        ".h -",
+        ".py",
+        ".rs",
+        "workspace",
+        "project",
+        "source",
+        "debugger",
+        "breakpoint",
+        "running tests",
+        "test results",
+        "test suite",
+        "junit",
+    ]
+    .iter()
+    .any(|hint| title.contains(hint))
+}
+
+fn looks_like_eclipse_work(lower: &str) -> bool {
+    if communication_mentions_another_tool(lower) {
+        return false;
+    }
+    let names_eclipse = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| word == "eclipse");
+    names_eclipse
+        && [
+            "eclipse-workspace",
+            ".java",
+            "java development environment",
+            "code editor",
+            "source code",
+            "source file",
+            "writing code",
+            "editing code",
+            "debugger",
+            "breakpoint",
+            "running tests",
+            "test results",
+            "test suite",
+            "junit",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
+}
+
+fn communication_mentions_another_tool(lower: &str) -> bool {
+    [
+        "messages about",
+        "conversation about",
+        "message about",
+        "discussing eclipse",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint))
+}
+
+/// Apply the same Eclipse correction when reading historic observations.
+/// Keep the stored evidence intact and do not reinterpret an app mentioned
+/// in another foreground application as the user's primary work.
+pub(crate) fn resolve_activity_category(
+    category: &str,
+    description: &str,
+    app: Option<&str>,
+    title: Option<&str>,
+) -> String {
+    let category = resolve_persisted_category(category);
+    if !weak_activity_category(&category) {
+        return category;
+    }
+    let description = description.to_lowercase();
+    if eclipse_work_window(app, title)
+        || ((eclipse_application(app) || app.is_none()) && looks_like_eclipse_work(&description))
+    {
+        return infer_engineering_subcategory(&format!(
+            "{} {description}",
+            title.unwrap_or_default().to_lowercase()
+        ));
+    }
+    category
+}
+
 fn infer_engineering_subcategory(lower: &str) -> String {
     if lower.contains("debugger") || lower.contains("breakpoint") {
         "Debugging".into()
@@ -371,6 +491,7 @@ fn infer_engineering_subcategory(lower: &str) -> String {
     } else if lower.contains("test suite")
         || lower.contains("running tests")
         || lower.contains("test results")
+        || lower.contains("junit")
     {
         "Testing".into()
     } else if lower.contains("docker")
@@ -843,6 +964,120 @@ mod tests {
         assert_eq!(
             correct_category_with_window("General", Some("Chrome"), Some("GitHub Actions")),
             "DevOps"
+        );
+    }
+
+    #[test]
+    fn eclipse_source_work_is_corrected_without_treating_every_eclipse_as_coding() {
+        for app in [
+            "eclipse",
+            "Eclipse.exe",
+            "Eclipse IDE",
+            "Eclipse.app",
+            "org.eclipse.platform",
+            "C:\\tools\\eclipse\\eclipse.exe",
+            "/opt/eclipse/eclipse",
+        ] {
+            assert_eq!(
+                correct_category_with_window(
+                    "Browsing",
+                    Some(app),
+                    Some("workspace - EmailService.java - Eclipse IDE"),
+                ),
+                "Coding",
+                "{app}",
+            );
+        }
+        let (_, category) = parse_analysis(
+            "APP: Eclipse\nCURRENT ACTION: editing a Java source file in the code editor\nCATEGORY: Browsing",
+        );
+        assert_eq!(category, "Coding");
+        assert_eq!(
+            correct_category_with_window(
+                "General",
+                Some("Eclipse"),
+                Some("debugger breakpoint - project")
+            ),
+            "Debugging",
+        );
+        assert_eq!(
+            correct_category_with_window(
+                "General",
+                Some("Eclipse"),
+                Some("JUnit test results - project")
+            ),
+            "Testing",
+        );
+        let (_, astronomy) = parse_analysis(
+            "APP: Chrome\nCURRENT ACTION: reading news about a solar eclipse\nCATEGORY: Browsing",
+        );
+        assert_eq!(astronomy, "Browsing");
+        let (_, welcome) = parse_analysis(
+            "APP: Eclipse IDE\nCURRENT ACTION: viewing a generic welcome window\nCATEGORY: General",
+        );
+        assert_eq!(welcome, "General");
+        let (_, discussion) = parse_analysis(
+            "APP: Slack\nCURRENT ACTION: messages about Eclipse source code\nCATEGORY: Communication",
+        );
+        assert_eq!(discussion, "Communication");
+        assert_eq!(
+            correct_category_with_window(
+                "Browsing",
+                Some("Eclipse"),
+                Some("embedded browser - news")
+            ),
+            "Browsing",
+        );
+    }
+
+    #[test]
+    fn historic_eclipse_labels_use_foreground_evidence_and_preserve_other_activities() {
+        assert_eq!(
+            resolve_activity_category(
+                "Browsing",
+                "editing controls",
+                Some("Eclipse.exe"),
+                Some("workspace - Main.java - Eclipse IDE"),
+            ),
+            "Coding",
+        );
+        assert_eq!(
+            resolve_activity_category(
+                "General",
+                "CURRENT ACTION: using debugger breakpoints in Eclipse",
+                Some("Eclipse"),
+                Some("Problem Occurred"),
+            ),
+            "Debugging",
+        );
+        for category in ["Research", "Learning", "CodeReview", "Custom workflow"] {
+            assert_eq!(
+                resolve_activity_category(
+                    category,
+                    "Eclipse code editor",
+                    Some("Eclipse"),
+                    Some("workspace - Main.java - Eclipse IDE"),
+                ),
+                category,
+            );
+        }
+        assert_eq!(
+            resolve_activity_category(
+                "Communication",
+                "messages discussing Eclipse IDE source code",
+                Some("Slack.exe"),
+                Some("Team chat"),
+            ),
+            "Communication",
+        );
+        assert_eq!(
+            resolve_activity_category(
+                "General",
+                "welcome screen",
+                Some("Eclipse IDE"),
+                Some("Welcome")
+            ),
+            "General",
         );
     }
 

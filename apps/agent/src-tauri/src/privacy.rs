@@ -14,6 +14,9 @@ use crate::sync::get_user_session_from_conn;
 use crate::sync_env::{supabase_anon_key, supabase_url};
 
 pub const PRIVACY_NOTICE_VERSION: &str = "2026-08-23";
+// The September local build adds a retention explanation to the same tracking
+// notice. Its acknowledgement covers the published August notice as well.
+const COMPATIBLE_MONITORING_NOTICE_VERSIONS: &[&str] = &["2026-08-23", "2026-09-28"];
 const PRIVACY_SETTINGS_KEY: &str = "privacy_settings";
 const DEFAULT_RETENTION_DAYS: u32 = 30;
 const MAX_RETENTION_DAYS: u32 = 3650;
@@ -112,6 +115,8 @@ struct ExportReport {
     window_title: Option<String>,
     capture_source: Option<String>,
     theme_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_observation: Option<crate::task_progress::ProgressObservation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +199,38 @@ pub fn cloud_sync_enabled(db_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn disable_cloud_for_context_change(conn: &Connection) -> Result<(), String> {
+    ensure_schema(conn)?;
+    let mut settings: PrivacySettings = config_value(conn, PRIVACY_SETTINGS_KEY)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if settings.cloud_sync_enabled {
+        record_choice(conn, "cloud_activity_sync", false)?;
+    }
+    if settings.cloud_ai_enabled {
+        record_choice(conn, "cloud_ai", false)?;
+    }
+    settings.cloud_sync_enabled = false;
+    settings.cloud_sync_enabled_at = None;
+    settings.cloud_ai_enabled = false;
+    settings.cloud_ai_enabled_at = None;
+    conn.execute(
+        "INSERT OR REPLACE INTO config(key,value) VALUES('start_monitoring_at_login','false')",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    save_privacy_settings(conn, &settings)
+}
+
+pub(crate) fn forget_monitoring_acknowledgement(conn: &Connection) -> Result<(), String> {
+    let mut settings: PrivacySettings = config_value(conn, PRIVACY_SETTINGS_KEY)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    settings.monitoring_notice_acknowledged = false;
+    settings.monitoring_notice_acknowledged_at = None;
+    save_privacy_settings(conn, &settings)
+}
+
 pub fn require_cloud_ai(db_path: &Path) -> Result<(), String> {
     let settings = load_privacy_settings(db_path)?;
     if settings.cloud_ai_enabled {
@@ -238,10 +275,14 @@ pub fn application_is_excluded(db_path: &Path, application: Option<&str>) -> boo
         .unwrap_or(true)
 }
 
+fn monitoring_notice_accepted(settings: &PrivacySettings) -> bool {
+    settings.monitoring_notice_acknowledged
+        && COMPATIBLE_MONITORING_NOTICE_VERSIONS.contains(&settings.notice_version.as_str())
+}
+
 pub fn require_monitoring_acknowledgement(db_path: &Path) -> Result<(), String> {
     let settings = load_privacy_settings(db_path)?;
-    if settings.monitoring_notice_acknowledged && settings.notice_version == PRIVACY_NOTICE_VERSION
-    {
+    if monitoring_notice_accepted(&settings) {
         Ok(())
     } else {
         Err("Review the local monitoring notice before starting tracking.".to_string())
@@ -267,13 +308,24 @@ pub fn enforce_local_retention(db_path: &Path) -> Result<usize, String> {
         .map_err(|error| error.to_string())?;
     }
     let modifier = format!("-{} days", settings.retention_days);
+    crate::work_review::prune(&conn, settings.retention_days)?;
+    // Capture the activity streak before either source of historical days expires.
+    crate::activity_streak::reconcile(&conn, Local::now().date_naive())?;
     let deleted = conn
         .execute(
             "DELETE FROM reports WHERE datetime(created_at) < datetime('now', ?1)",
             params![modifier],
         )
         .map_err(|error| error.to_string())?;
+    crate::sync::ensure_capture_schema(&conn)?;
+    conn.execute(
+        "DELETE FROM cloud_observation_owner WHERE report_id NOT IN (SELECT rowid FROM reports)",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
     if tracking_table_exists(&conn)? {
+        // Preserve minimal earned counters and this week's marks before raw time expires.
+        crate::daily_flow::reconcile_progress(&conn, Local::now().date_naive())?;
         conn.execute(
             "DELETE FROM tracking_daily_time WHERE date < date('now', 'localtime', ?1)",
             params![modifier],
@@ -310,7 +362,7 @@ fn sync_server_privacy_settings(conn: &Connection, settings: &PrivacySettings) {
                 .bearer_auth(session.access_token)
                 .json(&json!({
                     "action": "update_preferences",
-                    "notice_version": settings.notice_version,
+                    "notice_version": PRIVACY_NOTICE_VERSION,
                     "cloud_sync_enabled": settings.cloud_sync_enabled,
                     "cloud_ai_enabled": settings.cloud_ai_enabled,
                 }))
@@ -325,11 +377,9 @@ fn sync_server_privacy_settings(conn: &Connection, settings: &PrivacySettings) {
 #[tauri::command]
 pub fn get_privacy_settings() -> Result<PrivacySettings, String> {
     let db_path = crate::paths::db_path()?;
-    let settings = load_privacy_settings(&db_path)?;
-    if let Ok(conn) = Connection::open(&db_path) {
-        sync_server_privacy_settings(&conn, &settings);
-    }
-    Ok(settings)
+    // Reading an already saved acknowledgement must not depend on the network.
+    // Explicit changes still mirror preferences in update_privacy_settings.
+    load_privacy_settings(&db_path)
 }
 
 #[tauri::command]
@@ -342,12 +392,13 @@ pub fn update_privacy_settings(patch: PrivacySettingsPatch) -> Result<PrivacySet
 
     if let Some(value) = patch.monitoring_notice_acknowledged {
         if value != settings.monitoring_notice_acknowledged
-            || settings.notice_version != PRIVACY_NOTICE_VERSION
+            || !COMPATIBLE_MONITORING_NOTICE_VERSIONS.contains(&settings.notice_version.as_str())
         {
             record_choice(&conn, "local_monitoring_notice", value)?;
+            settings.monitoring_notice_acknowledged_at = value.then(|| now.clone());
+            settings.notice_version = PRIVACY_NOTICE_VERSION.to_string();
         }
         settings.monitoring_notice_acknowledged = value;
-        settings.monitoring_notice_acknowledged_at = value.then(|| now.clone());
     }
     if let Some(value) = patch.cloud_sync_enabled {
         if value != settings.cloud_sync_enabled {
@@ -400,7 +451,6 @@ pub fn update_privacy_settings(patch: PrivacySettingsPatch) -> Result<PrivacySet
         settings.retention_days = value;
     }
 
-    settings.notice_version = PRIVACY_NOTICE_VERSION.to_string();
     settings.updated_at = Some(now);
     save_privacy_settings(&conn, &settings)?;
     drop(conn);
@@ -449,11 +499,12 @@ pub fn export_personal_data(include_cloud: bool) -> Result<String, String> {
     let db_path = crate::paths::db_path()?;
     let conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
     ensure_schema(&conn)?;
+    crate::task_progress::ensure_schema(&conn).map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, COALESCE(description,''), COALESCE(activity_type,''), COALESCE(synced,0),
                     COALESCE(created_at,''), jira_ticket_id, COALESCE(duration_seconds,0),
-                    active_app, window_title, capture_source, theme_hint
+                    active_app, window_title, capture_source, theme_hint, progress_observation
              FROM reports ORDER BY datetime(created_at) ASC, id ASC",
         )
         .map_err(|error| error.to_string())?;
@@ -471,6 +522,9 @@ pub fn export_personal_data(include_cloud: bool) -> Result<String, String> {
                 window_title: row.get(8)?,
                 capture_source: row.get(9)?,
                 theme_hint: row.get(10)?,
+                progress_observation: row
+                    .get::<_, Option<String>>(11)?
+                    .and_then(|raw| serde_json::from_str(&raw).ok()),
             })
         })
         .map_err(|error| error.to_string())?
@@ -558,11 +612,17 @@ pub fn export_personal_data(include_cloud: bool) -> Result<String, String> {
             "withdrawal_pending": analytics.withdrawal_pending,
         },
         "user_preferences": user_preferences,
+        "local_review_decisions": crate::work_review::list(&conn)?,
         "weekly_report_schedule": weekly_report_schedule,
         "local_agent_data": local_agent_data,
         "application_settings": application_settings,
         "local_activity_reports": reports,
         "local_tracking_days": tracked_days,
+        "local_daily_flow_progress": config_value(&conn, crate::daily_flow::PROGRESS_KEY)
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok()),
+        "local_activity_streak": config_value(&conn, crate::activity_streak::CHECKPOINT_KEY)
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok()),
+        "online_leagues": crate::online_leagues::export_data(&conn, include_cloud)?,
         "local_coach_messages": coach_messages,
         "privacy_choice_history": privacy_events,
         "cloud_data": cloud,
@@ -619,7 +679,7 @@ fn remove_runtime_artifacts(app: &tauri::AppHandle) -> Vec<String> {
     warnings
 }
 
-fn erase_local_database(conn: &Connection) -> Result<(), String> {
+pub(crate) fn erase_local_database(conn: &Connection) -> Result<(), String> {
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| error.to_string())?;
@@ -633,7 +693,7 @@ fn erase_local_database(conn: &Connection) -> Result<(), String> {
         .execute("DELETE FROM config", [])
         .map_err(|error| error.to_string())?;
     transaction
-        .execute_batch("DROP TABLE IF EXISTS tracking_daily_time;")
+        .execute_batch("DROP TABLE IF EXISTS work_review_decisions; DROP TABLE IF EXISTS tracking_daily_time; DROP TABLE IF EXISTS online_observation_owner; DROP TABLE IF EXISTS online_local_consent; DROP TABLE IF EXISTS cloud_observation_owner;")
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
@@ -747,6 +807,53 @@ mod tests {
         assert!(settings
             .excluded_applications
             .contains(&"Bitwarden".to_string()));
+    }
+
+    #[test]
+    fn accepted_notice_survives_database_reopen_for_both_existing_builds() {
+        let (_dir, path) = test_db();
+        for version in COMPATIBLE_MONITORING_NOTICE_VERSIONS {
+            let settings = PrivacySettings {
+                notice_version: (*version).into(),
+                monitoring_notice_acknowledged: true,
+                monitoring_notice_acknowledged_at: Some("2026-10-07T17:59:39Z".into()),
+                ..PrivacySettings::default()
+            };
+            let conn = Connection::open(&path).unwrap();
+            save_privacy_settings(&conn, &settings).unwrap();
+            drop(conn);
+            for _ in 0..3 {
+                assert!(require_monitoring_acknowledgement(&path).is_ok());
+                let loaded = load_privacy_settings(&path).unwrap();
+                assert_eq!(loaded.notice_version, *version);
+                assert_eq!(
+                    loaded.monitoring_notice_acknowledged_at,
+                    settings.monitoring_notice_acknowledged_at
+                );
+                assert!(!loaded.cloud_sync_enabled);
+                assert!(!loaded.cloud_ai_enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_withdrawn_and_unknown_notices_still_require_acknowledgement() {
+        let (_dir, path) = test_db();
+        assert!(require_monitoring_acknowledgement(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        for (version, acknowledged) in [
+            ("2026-08-23", false),
+            ("2026-09-28", false),
+            ("2099-01-01", true),
+        ] {
+            let settings = PrivacySettings {
+                notice_version: version.into(),
+                monitoring_notice_acknowledged: acknowledged,
+                ..PrivacySettings::default()
+            };
+            save_privacy_settings(&conn, &settings).unwrap();
+            assert!(require_monitoring_acknowledgement(&path).is_err());
+        }
     }
 
     #[test]
